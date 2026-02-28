@@ -18,7 +18,7 @@ if load_dotenv is not None:
 
 HOST = os.getenv("SERVER_HOST", "127.0.0.1")
 PORT = int(os.getenv("SERVER_PORT", "5555"))
-MAX_PLAYERS = int(os.getenv("MAX_PLAYERS", "5"))
+MAX_PLAYERS = int(os.getenv("MAX_PLAYERS", "6"))  # 1 хост + 5 игроков
 SERVER_PASSWORD = os.getenv("SERVER_PASSWORD", "my_super_password")
 
 COLS = 60
@@ -181,7 +181,7 @@ def place_stamp(x, y, tool):
 
     elif tool == "wood_floor":
         c = grid[y][x]
-        c.type = "floor"          # можно сделать отдельный тип, если хочешь
+        c.type = "floor"          # можно сделать отдельный тип, если хотите
         c.fuel = random.randint(140, 190)
         c.moisture = 12
         c.state = "unburned"
@@ -240,6 +240,8 @@ def update_fire():
     for y in range(ROWS):
         for x in range(COLS):
             c = grid[y][x]
+            heat_map[y][x] = c.heat * 0.67  # Затухание предыдущего тепла
+
             if c.intensity <= 8: continue
 
             props = FUEL_PROPERTIES.get(c.type, FUEL_PROPERTIES["grass"])
@@ -269,7 +271,7 @@ def update_fire():
                 c.heat = 0
                 continue
 
-            c.heat = c.heat * 0.67 + heat_map[y][x]
+            c.heat = heat_map[y][x]
 
             if c.state in ("unburned", "smoldering") and c.fuel > 16:
                 props = FUEL_PROPERTIES.get(c.type, FUEL_PROPERTIES["grass"])
@@ -304,8 +306,8 @@ def update_fire():
                 c.heat *= 0.52
 
 # ================= СЕТЬ =================
-clients = []
-client_roles = {}
+clients = []                    # все активные соединения
+client_roles = {}               # conn → роль
 grid_lock = threading.Lock()
 ALLOWED_ROLES = {"rtp", "nsh", "br", "dispatcher"}
 ROLE_LABELS = {
@@ -332,63 +334,81 @@ def send_msg(sock, data):
     except:
         pass
 
+def broadcast(data):
+    """Отправить сообщение ВСЕМ подключённым клиентам"""
+    payload = json.dumps(data).encode('utf-8')
+    packet = struct.pack('>I', len(payload)) + payload
+    for c in clients[:]:
+        try:
+            c.sendall(packet)
+        except Exception:
+            # если ошибка отправки — удаляем клиента
+            if c in clients:
+                clients.remove(c)
+            if c in client_roles:
+                del client_roles[c]
+
 def client_thread(conn, addr):
-    global edit_mode, running_sim, grid, WIND, WIND_STRENGTH
-    print(f"[?] Попытка входа от: {addr}. Ожидание авторизации...")
+    global edit_mode, running_sim, grid
+
+    print(f"[?] Попытка входа от: {addr}")
 
     try:
-        conn.settimeout(5.0)
+        conn.settimeout(10.0)
         raw_msglen = recv_exact(conn, 4)
         if not raw_msglen:
-            print(f"[-] {addr} не прислал данные авторизации")
+            print(f"[-] {addr} не прислал авторизацию")
             return
         msglen = struct.unpack('>I', raw_msglen)[0]
-        if msglen <= 0 or msglen > 4096:
-            print(f"[-] Некорректный пакет авторизации от {addr}: {msglen}")
-            return
-
         data = recv_exact(conn, msglen)
         if not data:
-            print(f"[-] Неполный пакет авторизации от {addr}")
             return
 
-        auth_cmd = json.loads(data.decode('utf-8'))
-        role = str(auth_cmd.get('role', '')).lower()
-
-        if auth_cmd.get('type') != 'AUTH' or auth_cmd.get('password') != SERVER_PASSWORD:
+        auth = json.loads(data.decode('utf-8'))
+        if auth.get('type') != 'AUTH' or auth.get('password') != SERVER_PASSWORD:
             send_msg(conn, {'type': 'AUTH_FAIL', 'reason': 'Неверный пароль'})
-            print(f"[-] Неверный пароль от {addr}. Отключаем.")
             return
 
+        role = auth.get('role', '').lower()
         if role not in ALLOWED_ROLES:
             send_msg(conn, {'type': 'AUTH_FAIL', 'reason': 'Недопустимая роль'})
-            print(f"[-] Недопустимая роль от {addr}: {role!r}. Отключаем.")
             return
 
         send_msg(conn, {'type': 'AUTH_OK', 'role': role})
         conn.settimeout(None)
 
-        clients.append(conn)
-        client_roles[conn] = role
-        print(f"[+] Игрок {addr} вошел в игру. Роль: {ROLE_LABELS.get(role, role)}")
-        
+        with grid_lock:
+            clients.append(conn)
+            client_roles[conn] = role
+
+        print(f"[+] {addr} вошёл как {ROLE_LABELS.get(role, role)} | Игроков: {len(clients)}")
+
+        # Отправляем текущее состояние новому игроку
+        with grid_lock:
+            net_grid = [[[c.fuel, c.intensity, c.type] for c in row] for row in grid]
+            send_msg(conn, {
+                'type': 'STATE_UPDATE',
+                'grid': net_grid,
+                'edit_mode': edit_mode,
+                'running_sim': running_sim
+            })
+
         while True:
             raw_msglen = recv_exact(conn, 4)
             if not raw_msglen:
                 break
             msglen = struct.unpack('>I', raw_msglen)[0]
-            if msglen <= 0 or msglen > 5000000:  
-                print(f"[-] Пакет слишком большой от {addr}: {msglen} байт")
-                break
             data = recv_exact(conn, msglen)
             if not data:
                 break
+
             cmd = json.loads(data.decode('utf-8'))
+            cmd_type = cmd.get('type')
 
             with grid_lock:
-                cmd_type = cmd.get('type')
                 if cmd_type == 'CLICK':
                     place_stamp(cmd['x'], cmd['y'], cmd['tool'])
+
                 elif cmd_type == 'FILL_BASE':
                     tool = cmd['tool']
                     for yy in range(ROWS):
@@ -411,47 +431,66 @@ def client_thread(conn, addr):
                                 c.heat = 0
                                 c.moisture = 25 if tool == "grass" else 15
                                 c.state = "unburned"
+
                 elif cmd_type == 'SPACE':
                     if edit_mode:
                         edit_mode = False
                         running_sim = True
                     else:
                         running_sim = not running_sim
+
                 elif cmd_type == 'R':
                     grid = [[Cell() for _ in range(COLS)] for _ in range(ROWS)]
                     edit_mode = True
                     running_sim = False
+
                 elif cmd_type == 'LOAD_MAP':
                     received_grid = cmd.get('grid')
-                    # Проверяем, что карта пришла и её размеры совпадают с сервером
                     if received_grid and len(received_grid) == ROWS and all(len(row) == COLS for row in received_grid):
                         for yy in range(ROWS):
                             for xx in range(COLS):
-                                # Клиент присылает ячейку в виде списка: [fuel, intensity, type]
                                 cell_data = received_grid[yy][xx]
                                 c = grid[yy][xx]
-                                
                                 c.fuel = cell_data[0]
                                 c.intensity = cell_data[1]
                                 c.type = cell_data[2]
-                                
-                                # Сбрасываем симуляционные параметры ячейки по умолчанию
                                 c.heat = 0.0
-                                if c.type in ("water", "stone", "concrete"):
-                                    c.moisture = 100 if c.type == "water" else 0
-                                    c.state = "burned"
-                                else:
-                                    c.moisture = 15.0 # Безопасное среднее значение влажности
-                                    # Если при загрузке ячейка уже горит, ставим правильный статус
-                                    c.state = "burning" if c.intensity > 0 else "unburned"
-                                    
+                                c.moisture = 15.0
+                                c.state = "burning" if cell_data[1] > 0 else "unburned"
                         edit_mode = True
                         running_sim = False
-                        print(f"Карта успешно загружена от клиента {addr}")
-            # =======================================================
+                        print(f"Карта загружена от клиента {addr}")
 
-    except socket.timeout:
-        print(f"[-] {addr} не прошел авторизацию вовремя. Отключен.")
+                # Обработка HOST_READY
+                elif cmd_type == 'HOST_READY':
+                    print(f"[HOST_READY] Получена финальная карта от хоста {addr}")
+                    final_grid = cmd.get('final_grid')
+
+                    if final_grid and len(final_grid) == ROWS and all(len(row) == COLS for row in final_grid):
+                        # Фиксируем карту
+                        for y in range(ROWS):
+                            for x in range(COLS):
+                                fuel, intensity, ctype = final_grid[y][x]
+                                c = grid[y][x]
+                                c.fuel = fuel
+                                c.intensity = intensity
+                                c.type = ctype
+                                c.heat = 0
+                                c.moisture = 22 if ctype in ("grass", "tree") else 0
+                                c.state = "unburned" if intensity == 0 else "burning"
+
+                        edit_mode = False
+                        running_sim = True
+
+                        # Рассылаем START_GAME всем
+                        broadcast({
+                            'type': 'START_GAME',
+                            'grid': final_grid,
+                            'message': 'Игра началась! Карта зафиксирована хостом.'
+                        })
+
+                        print("[SERVER] START_GAME разослан всем игрокам")
+
     except Exception as e:
         print(f"[!] Ошибка клиента {addr}: {e}")
     finally:
@@ -471,12 +510,15 @@ def game_loop():
             frame += 1
 
             net_grid = [[[c.fuel, c.intensity, c.type] for c in row] for row in grid]
-            state = {'grid': net_grid, 'edit_mode': edit_mode, 'running_sim': running_sim}
+            state = {
+                'type': 'STATE_UPDATE',
+                'grid': net_grid,
+                'edit_mode': edit_mode,
+                'running_sim': running_sim
+            }
 
-        for c in clients[:]:
-            send_msg(c, state)
-
-        time.sleep(1/33)
+        broadcast(state)
+        time.sleep(1 / 33)
 
 # ================= ЗАПУСК =================
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -484,13 +526,14 @@ server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind((HOST, PORT))
 server.listen(MAX_PLAYERS)
 
-print(f"Сервер запущен на {HOST}:{PORT} | Пароль: {SERVER_PASSWORD}")
+print(f"Сервер запущен на {HOST}:{PORT} | Пароль: {SERVER_PASSWORD} | Макс. игроков: {MAX_PLAYERS}")
 
 threading.Thread(target=game_loop, daemon=True).start()
+
 while True:
     conn, addr = server.accept()
     if len(clients) >= MAX_PLAYERS:
+        print(f"[!] Отказ {addr} — сервер заполнен ({len(clients)}/{MAX_PLAYERS})")
         conn.close()
     else:
-        # Теперь мы НЕ добавляем в список клиентов сразу, а передаем в поток для проверки пароля
         threading.Thread(target=client_thread, args=(conn, addr), daemon=True).start()

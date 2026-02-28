@@ -149,38 +149,46 @@ tool_names = {
 
 current_tool = "grass"
 
+# >>>>>>>>>> ИЗМЕНЕНИЕ 1: Словарь размеров многоячеечных объектов <<<<<<<<<<
+MULTI_CELL_SIZES = {
+    "firecar":    (4, 8),   # 64×128 px = 4×8 клеток
+    "road":       (4, 4),   # CELL*4 × CELL*4 = 4×4 клетки
+    "road_right": (5, 5),   # CELL*5 × CELL*5 = 5×5 клеток
+}
+
+
+TOOL_SERVER_NAME = {
+    "road":       "road_straight",
+    "road_right": "road_turn",
+}
 # ================= КАТЕГОРИИ =================
 SECTION_BTN_H = 36
 SECTION_BTN_W = PANEL_WIDTH - 30
 SECTION_GAP = 8
 DROPDOWN_ITEM_H = 30
 DROPDOWN_ITEM_GAP = 6
-DROPDOWN_TOP_PAD = 8    # отступ сверху от кнопки секции до первого элемента
-DROPDOWN_BOTTOM_PAD = 4 # отступ снизу после последнего элемента
+DROPDOWN_TOP_PAD = 8
+DROPDOWN_BOTTOM_PAD = 4
 
-SECTION_KEYS = ["cars", "objects", "floor"]
+SECTION_KEYS = ["cars", "objects", "floor", "roads"]
 
 CATEGORIES = {
     "cars": ["firecar"],
     "objects": ["hydrant", "house", "wall", "lake", "tree", "ignite"],
-    "floor": ["grass", "floor", "wood_floor", "stone", "concrete"]
+    "floor": ["grass", "floor", "wood_floor", "stone", "concrete"],
+    "roads": ["road", "road_right"]
 }
-SECTION_LABELS = {"cars": "Машины", "objects": "Объекты", "floor": "Пол"}
+SECTION_LABELS = {"cars": "Машины", "objects": "Объекты", "floor": "Пол", "roads": "Дороги"}
 
 dropdown_open_section = None
 last_dropdown_buttons = []
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-# Динамически вычисляемые rect-ы для секций и нижних кнопок
-# Хранятся между кадрами, чтобы обработчик событий мог их использовать
-last_section_buttons = []   # [{"key": ..., "rect": Rect}, ...]
+last_section_buttons = []
 last_save_rect = None
 last_load_rect = None
 last_reset_rect = None
-# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 
 def calc_dropdown_height(section_key):
-    """Высота выпадающего списка для данной секции (включая отступы)."""
     n = len(CATEGORIES[section_key])
     return DROPDOWN_TOP_PAD + n * DROPDOWN_ITEM_H + (n - 1) * DROPDOWN_ITEM_GAP + DROPDOWN_BOTTOM_PAD
 
@@ -387,9 +395,46 @@ def draw_grid():
             draw_textured_cell(screen, rect, fuel, intensity, ctype, x, y)
 
 
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-# НОВАЯ draw_ui — динамический расчёт позиций
-# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+# >>>>>>>>>> ИЗМЕНЕНИЕ 3 (часть): Превью многоячеечного объекта <<<<<<<<<<
+def draw_multi_cell_preview():
+    """Рисует полупрозрачный прямоугольник-превью для многоячеечного инструмента."""
+    if not edit_mode:
+        return
+    if current_tool not in MULTI_CELL_SIZES:
+        return
+    mx, my = pygame.mouse.get_pos()
+    if mx >= GRID_WIDTH or mx < 0 or my < 0 or my >= HEIGHT:
+        return
+
+    gx, gy = mx // CELL, my // CELL
+    w, h = MULTI_CELL_SIZES[current_tool]
+
+    # Проверяем, помещается ли объект в сетку
+    fits = (0 <= gx <= COLS - w) and (0 <= gy <= ROWS - h)
+
+    pw, ph = w * CELL, h * CELL
+    preview_surf = pygame.Surface((pw, ph), pygame.SRCALPHA)
+
+    if fits:
+        # Зелёноватая подсветка — можно поставить
+        preview_surf.fill((100, 255, 100, 45))
+        border_color = (80, 255, 80)
+        # Если есть текстура — рисуем полупрозрачный предпросмотр
+        tex_key = current_tool
+        if tex_key in TEXTURES:
+            ghost = TEXTURES[tex_key].copy()
+            ghost.set_alpha(120)
+            preview_surf.blit(ghost, (0, 0))
+    else:
+        # Красноватая — не помещается
+        preview_surf.fill((255, 80, 80, 50))
+        border_color = (255, 60, 60)
+
+    screen.blit(preview_surf, (gx * CELL, gy * CELL))
+    pygame.draw.rect(screen, border_color,
+                     (gx * CELL, gy * CELL, pw, ph), 2)
+
+
 def draw_ui():
     global last_dropdown_buttons, last_section_buttons
     global last_save_rect, last_load_rect, last_reset_rect
@@ -402,11 +447,9 @@ def draw_ui():
 
     mouse_pos = pygame.mouse.get_pos()
 
-    # --- Динамический расчёт Y для каждой секции ---
-    cur_y = 18  # начальная Y
+    cur_y = 18
 
     for idx, key in enumerate(SECTION_KEYS):
-        # Рисуем кнопку секции
         rect = pygame.Rect(GRID_WIDTH + 15, cur_y, SECTION_BTN_W, SECTION_BTN_H)
         last_section_buttons.append({"key": key, "rect": rect})
 
@@ -417,7 +460,6 @@ def draw_ui():
         pygame.draw.rect(screen, color, rect, border_radius=8)
         pygame.draw.rect(screen, border, rect, width=3 if active or hover else 1, border_radius=8)
 
-        # Стрелочка ▼ / ▲
         arrow = "▲" if active else "▼"
         arrow_surf = small_font.render(arrow, True, (255, 255, 255))
         screen.blit(arrow_surf, (rect.right - 24, rect.y + 8))
@@ -425,9 +467,8 @@ def draw_ui():
         txt = small_font.render(SECTION_LABELS[key], True, (255, 255, 255))
         screen.blit(txt, (rect.x + 12, rect.y + 8))
 
-        cur_y += SECTION_BTN_H  # сдвигаемся вниз на высоту кнопки
+        cur_y += SECTION_BTN_H
 
-        # Если эта секция раскрыта — рисуем dropdown и сдвигаем cur_y
         if dropdown_open_section == key:
             items = CATEGORIES[key]
             cur_y += DROPDOWN_TOP_PAD
@@ -436,7 +477,6 @@ def draw_ui():
                 item_rect = pygame.Rect(GRID_WIDTH + 20, cur_y,
                                         PANEL_WIDTH - 40, DROPDOWN_ITEM_H)
                 item_hover = item_rect.collidepoint(mouse_pos)
-                # Подсветка выбранного инструмента
                 is_selected = (current_tool == item)
                 if is_selected:
                     bg_color = (110, 130, 180)
@@ -455,7 +495,14 @@ def draw_ui():
                     thumb = pygame.transform.scale(TEXTURES[item], (24, 24))
                     screen.blit(thumb, (item_rect.x + 6, item_rect.y + 3))
                     tx += 30
-                screen.blit(small_font.render(tool_names.get(item, item), True, (255, 255, 255)),
+
+                # >>>>>>>>>> Показываем размер для многоячеечных объектов <<<<<<<<<<
+                label = tool_names.get(item, item)
+                if item in MULTI_CELL_SIZES:
+                    w, h = MULTI_CELL_SIZES[item]
+                    label += f" ({w}×{h})"
+
+                screen.blit(small_font.render(label, True, (255, 255, 255)),
                             (tx, item_rect.y + 6))
 
                 last_dropdown_buttons.append({"rect": item_rect, "tool": item,
@@ -463,15 +510,11 @@ def draw_ui():
 
                 cur_y += DROPDOWN_ITEM_H + DROPDOWN_ITEM_GAP
 
-            # убираем лишний GAP после последнего элемента, добавляем BOTTOM_PAD
             cur_y -= DROPDOWN_ITEM_GAP
             cur_y += DROPDOWN_BOTTOM_PAD
 
-        # отступ перед следующей секцией
         cur_y += SECTION_GAP
 
-    # --- Кнопки сохранения / загрузки / сброса ---
-    # Добавляем отступ перед нижними кнопками
     cur_y += 16
     half_w = (PANEL_WIDTH - 30) // 2
 
@@ -499,7 +542,11 @@ def draw_ui():
     rt = small_font.render("ОЧИСТИТЬ ВСЁ", True, (255, 255, 255))
     screen.blit(rt, rt.get_rect(center=last_reset_rect.center))
 
-    # Подсказка внизу
+    # Подсказка внизу — добавляем информацию о текущем инструменте
+    tool_label = tool_names.get(current_tool, current_tool)
+    hint_tool = small_font.render(f"Инструмент: {tool_label}", True, (220, 230, 255))
+    screen.blit(hint_tool, (20, HEIGHT - 48))
+
     hint = small_font.render("SPACE — старт/пауза • R — сброс", True, (170, 180, 200))
     screen.blit(hint, (20, HEIGHT - 26))
 
@@ -529,12 +576,35 @@ while running:
                 }
                 if event.key in key_map: current_tool = key_map[event.key]
 
+        # >>>>>>>>>> ИЗМЕНЕНИЕ 2: Обработка кликов — разделяем сетку и UI <<<<<<<<<<
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
-            if mx > GRID_WIDTH:  # клик по UI панели
+
+            # ---------- Клик по СЕТКЕ ----------
+            if mx < GRID_WIDTH:
+                gx, gy = mx // CELL, my // CELL
+
+                if current_tool in MULTI_CELL_SIZES and edit_mode:
+                    w, h = MULTI_CELL_SIZES[current_tool]
+                    if 0 <= gx <= COLS - w and 0 <= gy <= ROWS - h:
+                        # >>>>>>>>>> КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ <<<<<<<<<<
+                        server_tool = TOOL_SERVER_NAME.get(current_tool, current_tool)
+                        send_to_server({
+                            'type': 'CLICK',
+                            'x': gx, 'y': gy,
+                            'tool': server_tool      # было current_tool
+                        })
+                        print(f"🔧 Ставлю {current_tool} → сервер: {server_tool} "
+                            f"({w}×{h}) в ({gx}, {gy})")
+                    else:
+                        print(f"⚠ Не помещается! {current_tool} ({w}×{h}) "
+                            f"в ({gx},{gy}), сетка {COLS}×{ROWS}")
+                # Одноячеечные объекты обрабатываются в непрерывном режиме ниже
+
+            # ---------- Клик по UI-ПАНЕЛИ ----------
+            else:
                 handled = False
 
-                # --- Клик по кнопкам секций ---
                 for sb in last_section_buttons:
                     if sb['rect'].collidepoint(event.pos):
                         key = sb['key']
@@ -547,7 +617,6 @@ while running:
                 if handled:
                     continue
 
-                # --- Клик по элементам выпадающего списка ---
                 for db in last_dropdown_buttons:
                     if db['rect'].collidepoint(event.pos):
                         picked = db['tool']
@@ -562,7 +631,6 @@ while running:
                 if handled:
                     continue
 
-                # --- Кнопки сохранения / загрузки / сброса ---
                 if last_save_rect and last_save_rect.collidepoint(event.pos):
                     save_map(); continue
                 if last_load_rect and last_load_rect.collidepoint(event.pos):
@@ -570,15 +638,17 @@ while running:
                 if last_reset_rect and last_reset_rect.collidepoint(event.pos):
                     send_to_server({'type': 'R'}); continue
 
+    # Непрерывное рисование — ТОЛЬКО для одноячеечных инструментов
     if edit_mode and pygame.mouse.get_pressed()[0]:
         mx, my = pygame.mouse.get_pos()
-        if mx < GRID_WIDTH:
+        if mx < GRID_WIDTH and current_tool not in MULTI_CELL_SIZES:  # <── ИЗМЕНЕНИЕ
             gx, gy = mx // CELL, my // CELL
             if 0 <= gx < COLS and 0 <= gy < ROWS:
                 send_to_server({'type': 'CLICK', 'x': gx, 'y': gy, 'tool': current_tool})
 
     screen.fill((12, 22, 45))
     draw_grid()
+    draw_multi_cell_preview()   # <── ИЗМЕНЕНИЕ: рисуем превью перед UI
     draw_ui()
     pygame.display.flip()
     clock.tick(FPS)

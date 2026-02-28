@@ -7,7 +7,6 @@ import subprocess
 import sys
 import threading
 import time
-from collections import deque
 
 import pygame
 
@@ -20,7 +19,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if load_dotenv is not None:
     load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-ROLE_KEYS = ["РТП", "НШ", "БР", "Диспетчер"]
+ROLE_KEYS = ["РТП", "Диспетчер", "Штаб", "БП-1", "БП-2"]
 
 
 def get_ui_font(size, bold=False):
@@ -190,12 +189,9 @@ def log_reader_loop(process, state, stop_event):
     for line in process.stdout:
         if stop_event.is_set():
             return
-
         text = line.rstrip("\n")
         if not text:
             continue
-            
-        # Выводим лог сервера прямо в консоль
         print(text)
 
         with state["lock"]:
@@ -213,11 +209,10 @@ def log_reader_loop(process, state, stop_event):
                 addr = m.group(1).strip()
                 if addr == state.get("observer_addr"):
                     continue
-                if addr in state["players"]:
-                    del state["players"][addr]
+                state["players"].pop(addr, None)
 
 
-def observer_loop(config, state, stop_event):
+def observer_loop(config, state, stop_event, game_started_event):
     host = config["SERVER_HOST"]
     if host in ("0.0.0.0", "::", ""):
         host = "127.0.0.1"
@@ -253,6 +248,17 @@ def observer_loop(config, state, stop_event):
 
             sock.settimeout(0.5)
             while not stop_event.is_set():
+                if game_started_event.is_set() and not state.get("game_sent", False):
+                    with state["lock"]:
+                        grid = state.get("grid")
+                    if grid:
+                        start_msg = {"type": "START_GAME", "grid": grid}
+                        payload = json.dumps(start_msg).encode("utf-8")
+                        sock.sendall(struct.pack(">I", len(payload)) + payload)
+                        with state["lock"]:
+                            state["game_sent"] = True
+                        print("[SERVER] START_GAME отправлен всем игрокам!")
+
                 raw_len = recv_exact(sock, 4, stop_event=stop_event, max_wait_sec=3.0)
                 if not raw_len:
                     break
@@ -286,21 +292,13 @@ def observer_loop(config, state, stop_event):
 def cell_color(cell):
     fuel, intensity, ctype = cell
     if intensity > 0:
-        if intensity > 30:
-            return (255, 120, 20)
-        return (255, 180, 50)
-    if ctype == "water":
-        return (25, 100, 200)
-    if ctype == "tree":
-        return (30, 120, 40)
-    if ctype == "grass":
-        return (50, 165, 70)
-    if ctype == "wall":
-        return (120, 90, 70)
-    if ctype == "floor":
-        return (145, 120, 80)
-    if fuel > 0:
-        return (70, 90, 70)
+        return (255, 120, 20) if intensity > 30 else (255, 180, 50)
+    if ctype == "water": return (25, 100, 200)
+    if ctype == "tree": return (30, 120, 40)
+    if ctype == "grass": return (50, 165, 70)
+    if ctype == "wall": return (120, 90, 70)
+    if ctype == "floor": return (145, 120, 80)
+    if fuel > 0: return (70, 90, 70)
     return (25, 25, 25)
 
 
@@ -308,13 +306,10 @@ def draw_minimap(surface, grid):
     if not grid:
         surface.fill((20, 20, 20))
         return
-
-    rows = len(grid)
-    cols = len(grid[0]) if rows > 0 else 0
+    rows, cols = len(grid), len(grid[0]) if grid else 0
     if rows == 0 or cols == 0:
         surface.fill((20, 20, 20))
         return
-
     cw = max(1, surface.get_width() // cols)
     ch = max(1, surface.get_height() // rows)
     surface.fill((15, 15, 15))
@@ -349,13 +344,17 @@ def dashboard_loop(config, process):
         "observer_error": "",
         "observer_addr": None,
         "last_grid_update": 0.0,
+        "game_started": False,
+        "game_sent": False,
     }
     stop_event = threading.Event()
+    game_started_event = threading.Event()
 
     threading.Thread(target=log_reader_loop, args=(process, state, stop_event), daemon=True).start()
-    threading.Thread(target=observer_loop, args=(config, state, stop_event), daemon=True).start()
+    threading.Thread(target=observer_loop, args=(config, state, stop_event, game_started_event), daemon=True).start()
 
     stop_rect = pygame.Rect(920, 38, 220, 56)
+    start_game_rect = pygame.Rect(920, 110, 220, 56)
     map_surface = pygame.Surface((420, 308))
 
     running = True
@@ -368,28 +367,68 @@ def dashboard_loop(config, process):
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 if stop_rect.collidepoint(event.pos):
                     if server_alive:
-                        try:
-                            process.terminate()
-                        except Exception:
-                            pass
-                    else:
-                        running = False
+                        process.terminate()
+                    running = False
+
+                # ←←← НАЖАТИЕ "НАЧАТЬ ИГРУ" ←←←
+                elif start_game_rect.collidepoint(event.pos) and not state["game_started"]:
+                    with state["lock"]:
+                        state["game_started"] = True
+                    game_started_event.set()
+
+                    print("\n" + "="*70)
+                    print("[HOST] НАЖАТА КНОПКА «НАЧАТЬ ИГРУ» — запускаем client.py как РТП...")
+
+                    client_path = os.path.join(BASE_DIR, "client.py")
+
+                    if not os.path.exists(client_path):
+                        print(f"[FATAL] client.py НЕ НАЙДЕН по пути:\n{client_path}")
+                        continue
+
+                    env = os.environ.copy()
+                    env.update(config)
+                    env["PLAYER_ROLE"] = "rtp"
+                    env["IS_HOST"] = "true"
+                    env["PYTHONUNBUFFERED"] = "1"
+
+                    try:
+                        if os.name == 'nt':
+                            creationflags = subprocess.CREATE_NO_WINDOW
+                        else:
+                            creationflags = 0
+                        proc = subprocess.Popen(
+                            [sys.executable, client_path],
+                            env=env,
+                            cwd=BASE_DIR,
+                            creationflags=creationflags
+                        )
+                        print(f"[SUCCESS] client.py запущен! PID = {proc.pid}")
+                    except Exception as e:
+                        print(f"[FATAL] Ошибка запуска: {e}")
+
+                    except Exception as e:
+                        print(f"[FATAL] Не удалось даже запустить subprocess: {type(e).__name__}: {e}")
+                        import traceback
+                        traceback.print_exc()
 
         with state["lock"]:
             grid = state["grid"]
             players = dict(state["players"])
-            observer_connected = state["observer_connected"]
-            observer_error = state["observer_error"]
-            last_grid_update = state["last_grid_update"]
+            game_started = state["game_started"]
+            players_count = len(players)
 
         draw_minimap(map_surface, grid)
         counts = role_counts(players)
 
         screen.fill((16, 22, 34))
         screen.blit(title_font.render("Админ-панель сервера", True, (240, 245, 255)), (34, 34))
+
         pygame.draw.rect(screen, (185, 62, 62), stop_rect, border_radius=10)
-        button_text = "Остановить сервер" if server_alive else "Закрыть панель"
-        screen.blit(font.render(button_text, True, (255, 255, 255)), (934, 54))
+        screen.blit(font.render("Остановить сервер", True, (255, 255, 255)), (934, 54))
+
+        color = (40, 160, 80) if not game_started else (80, 80, 80)
+        pygame.draw.rect(screen, color, start_game_rect, border_radius=10)
+        screen.blit(font.render("НАЧАТЬ ИГРУ", True, (255, 255, 255)), (942, 126))
 
         status = "Работает" if server_alive else "Остановлен"
         status_col = (90, 220, 120) if server_alive else (240, 110, 110)
@@ -397,43 +436,34 @@ def dashboard_loop(config, process):
         screen.blit(small_font.render(f"Host: {config['SERVER_HOST']}:{config['SERVER_PORT']}", True, (185, 200, 225)), (40, 124))
         screen.blit(small_font.render(f"Лимит игроков: {config['MAX_PLAYERS']}", True, (185, 200, 225)), (40, 146))
 
-        obs_status = "OK" if observer_connected else "OFF"
-        obs_col = (120, 220, 140) if observer_connected else (240, 130, 130)
-        screen.blit(small_font.render(f"Канал карты: {obs_status}", True, obs_col), (40, 170))
-        if observer_error:
-            screen.blit(small_font.render(f"Ошибка канала: {observer_error[:80]}", True, (240, 130, 130)), (40, 192))
-        if last_grid_update > 0:
-            dt = time.time() - last_grid_update
-            lag_col = (120, 220, 140) if dt < 1.0 else (255, 190, 120)
-            screen.blit(small_font.render(f"Обновление карты: {dt:.1f}с назад", True, lag_col), (40, 214))
+        screen.blit(font.render(f"ПОДКЛЮЧЕНО ИГРОКОВ: {players_count}", True, (90, 220, 120)), (40, 178))
 
         map_rect = pygame.Rect(40, 230, 420, 308)
         pygame.draw.rect(screen, (70, 85, 112), map_rect, width=2, border_radius=8)
-        screen.blit(map_surface, (map_rect.x, map_rect.y))
+        screen.blit(map_surface, map_rect.topleft)
         screen.blit(small_font.render("Мини-карта (real-time)", True, (200, 214, 236)), (40, 548))
 
         panel_x = 500
-        screen.blit(font.render(f"Подключено: {len(players)}", True, (240, 245, 255)), (panel_x, 230))
+        screen.blit(font.render(f"Подключено: {players_count}", True, (240, 245, 255)), (panel_x, 230))
         screen.blit(small_font.render(
-            f"РТП: {counts['РТП']} | НШ: {counts['НШ']} | БР: {counts['БР']} | Диспетчер: {counts['Диспетчер']}",
-            True,
-            (188, 206, 230),
-        ), (panel_x, 264))
+            f"РТП: {counts['РТП']} | Дисп: {counts['Диспетчер']} | Штаб: {counts['Штаб']} | БП-1: {counts['БП-1']} | БП-2: {counts['БП-2']}",
+            True, (188, 206, 230)), (panel_x, 264))
 
         screen.blit(font.render("Игроки", True, (240, 245, 255)), (panel_x, 304))
         y = 338
         if players:
             for addr, role in list(players.items())[:12]:
-                line = f"{role}: {addr}"
-                screen.blit(small_font.render(line, True, (205, 217, 235)), (panel_x, y))
+                screen.blit(small_font.render(f"{role}: {addr}", True, (205, 217, 235)), (panel_x, y))
                 y += 24
         else:
             screen.blit(small_font.render("Нет подключений", True, (170, 182, 205)), (panel_x, y))
 
+        if game_started:
+            screen.blit(small_font.render("ИГРА ЗАПУЩЕНА (хост тоже в игре)", True, (90, 220, 120)), (40, 210))
+
         pygame.display.flip()
         clock.tick(30)
 
-    # Завершающий блок, который вы скинули
     stop_event.set()
     if process.poll() is None:
         process.terminate()
