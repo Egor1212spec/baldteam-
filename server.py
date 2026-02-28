@@ -322,7 +322,7 @@ server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind((HOST, PORT))
 server.listen(MAX_PLAYERS)
 
-print(f"🌲 Сервер запущен на {HOST}:{PORT} | Пароль: {SERVER_PASSWORD}")
+print(f"Сервер запущен на {HOST}:{PORT} | Пароль: {SERVER_PASSWORD}")
 
 threading.Thread(target=game_loop, daemon=True).start()
 
