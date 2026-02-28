@@ -52,6 +52,9 @@ FUEL_PROPERTIES = {
     "floor":    {"ign_temp": 48, "burn_rate": 2.2, "heat_gen": 70, "spread_mult": 1.4},
     "stone":    {"ign_temp": 9999,"burn_rate": 0,   "heat_gen": 0,   "spread_mult": 0},
     "water":    {"ign_temp": 9999,"burn_rate": 0,   "heat_gen": 0,   "spread_mult": 0},
+    "concrete": {"ign_temp": 9999, "burn_rate": 0,   "heat_gen": 0,   "spread_mult": 0},
+    "hydrant":  {"ign_temp": 140,   "burn_rate": 0.4, "heat_gen": 35,  "spread_mult": 0.3},
+    "wood_floor":{"ign_temp": 45,   "burn_rate": 2.8, "heat_gen": 75,  "spread_mult": 1.6},
 }
 
 def place_stamp(x, y, tool):
@@ -158,6 +161,26 @@ def place_stamp(x, y, tool):
         c.heat = 92.0
         c.state = "burning"
         c.moisture = 4.0
+    elif tool == "concrete":
+        c = grid[y][x]
+        c.type = "concrete"
+        c.fuel = 0
+        c.moisture = 0
+        c.state = "burned"
+
+    elif tool == "hydrant":
+        c = grid[y][x]
+        c.type = "hydrant"
+        c.fuel = random.randint(8, 25)
+        c.moisture = 5
+        c.state = "unburned"
+
+    elif tool == "wood_floor":
+        c = grid[y][x]
+        c.type = "floor"          # можно сделать отдельный тип, если хочешь
+        c.fuel = random.randint(140, 190)
+        c.moisture = 12
+        c.state = "unburned"
 
 def update_fire():
     if not running_sim: return
@@ -305,7 +328,8 @@ def client_thread(conn, addr):
             if not raw_msglen:
                 break
             msglen = struct.unpack('>I', raw_msglen)[0]
-            if msglen <= 0 or msglen > 200000:
+            if msglen <= 0 or msglen > 5000000:  
+                print(f"[-] Пакет слишком большой от {addr}: {msglen} байт")
                 break
             data = recv_exact(conn, msglen)
             if not data:
@@ -348,6 +372,34 @@ def client_thread(conn, addr):
                     grid = [[Cell() for _ in range(COLS)] for _ in range(ROWS)]
                     edit_mode = True
                     running_sim = False
+                elif cmd_type == 'LOAD_MAP':
+                    received_grid = cmd.get('grid')
+                    # Проверяем, что карта пришла и её размеры совпадают с сервером
+                    if received_grid and len(received_grid) == ROWS and all(len(row) == COLS for row in received_grid):
+                        for yy in range(ROWS):
+                            for xx in range(COLS):
+                                # Клиент присылает ячейку в виде списка: [fuel, intensity, type]
+                                cell_data = received_grid[yy][xx]
+                                c = grid[yy][xx]
+                                
+                                c.fuel = cell_data[0]
+                                c.intensity = cell_data[1]
+                                c.type = cell_data[2]
+                                
+                                # Сбрасываем симуляционные параметры ячейки по умолчанию
+                                c.heat = 0.0
+                                if c.type in ("water", "stone", "concrete"):
+                                    c.moisture = 100 if c.type == "water" else 0
+                                    c.state = "burned"
+                                else:
+                                    c.moisture = 15.0 # Безопасное среднее значение влажности
+                                    # Если при загрузке ячейка уже горит, ставим правильный статус
+                                    c.state = "burning" if c.intensity > 0 else "unburned"
+                                    
+                        edit_mode = True
+                        running_sim = False
+                        print(f"Карта успешно загружена от клиента {addr}")
+            # =======================================================
 
     except socket.timeout:
         print(f"[-] {addr} не прошел авторизацию вовремя. Отключен.")
