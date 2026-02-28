@@ -1,5 +1,6 @@
 import os
 import sys
+import subprocess
 import socket
 import threading
 import json
@@ -46,10 +47,14 @@ def get_ui_font(size, bold=False):
     ]
     for path in font_paths:
         if os.path.exists(path):
-            try: return pygame.font.Font(path, size)
-            except Exception: pass
-    try: return pygame.font.SysFont("arial", size, bold=bold)
-    except Exception: return pygame.font.Font(None, size)
+            try:
+                return pygame.font.Font(path, size)
+            except Exception:
+                pass
+    try:
+        return pygame.font.SysFont("arial", size, bold=bold)
+    except Exception:
+        return pygame.font.Font(None, size)
 
 # ================= НАСТРОЙКИ PYGAME =================
 CELL = 16
@@ -72,6 +77,7 @@ small_font = get_ui_font(16)
 # ================= ТЕКСТУРЫ =================
 TEXTURE_DIR = os.path.join(BASE_DIR, "textures")
 TEXTURES = {}
+fire_texture = None
 
 for file in os.listdir(TEXTURE_DIR):
     if file.lower().endswith(".png"):
@@ -95,14 +101,14 @@ def load_textures():
     global TEXTURES, fire_texture
     os.makedirs(TEXTURE_DIR, exist_ok=True)
     TEXTURES = {}
-    print(f"🌲 Загрузка текстур из: {TEXTURE_DIR}")
+    print(f"Загрузка текстур из: {TEXTURE_DIR}")
 
     fire_path = os.path.join(BASE_DIR, "fire.png")
     try:
         fire_texture = pygame.image.load(fire_path).convert_alpha()
-        print("   ✓ fire.png загружен")
+        print("   fire.png загружен")
     except Exception:
-        print("   ⚠ fire.png не найден! Создаем заглушку.")
+        print("   fire.png не найден! Создаем заглушку.")
         fire_texture = pygame.Surface((CELL, CELL), pygame.SRCALPHA)
         fire_texture.fill((255, 100, 0, 180))
 
@@ -116,17 +122,17 @@ def load_textures():
             if key in ("firecar",):
                 TEXTURES["firecar"] = pygame.transform.scale(img, (64, 128))
             elif key in ("road", "road_straight"):
-                TEXTURES["road"] = pygame.transform.scale(img, (CELL*4, CELL*4))
+                TEXTURES["road"] = pygame.transform.scale(img, (CELL * 4, CELL * 4))
             elif key in ("road_right", "road_turn"):
-                TEXTURES["road_right"] = pygame.transform.scale(img, (CELL*5, CELL*5))
+                TEXTURES["road_right"] = pygame.transform.scale(img, (CELL * 5, CELL * 5))
             elif key == "grass":
                 TEXTURES["grass"] = pygame.transform.scale(img, (CELL, CELL))
             else:
                 TEXTURES[key] = pygame.transform.scale(img, (CELL, CELL))
-            print(f"   ✓ {filename} → {key}")
+            print(f"   {filename} -> {key}")
         except Exception as e:
-            print(f"   ✗ {filename}: {e}")
-    print(f"✅ Загружено текстур: {len(TEXTURES)}")
+            print(f"   {filename}: {e}")
+    print(f"Загружено текстур: {len(TEXTURES)}")
 
 load_textures()
 
@@ -149,18 +155,18 @@ tool_names = {
 
 current_tool = "grass"
 
-# >>>>>>>>>> ИЗМЕНЕНИЕ 1: Словарь размеров многоячеечных объектов <<<<<<<<<<
+# ================= МНОГОЯЧЕЕЧНЫЕ ОБЪЕКТЫ =================
 MULTI_CELL_SIZES = {
-    "firecar":    (4, 8),   # 64×128 px = 4×8 клеток
-    "road":       (4, 4),   # CELL*4 × CELL*4 = 4×4 клетки
-    "road_right": (5, 5),   # CELL*5 × CELL*5 = 5×5 клеток
+    "firecar":    (4, 8),
+    "road":       (4, 4),
+    "road_right": (5, 5),
 }
-
 
 TOOL_SERVER_NAME = {
     "road":       "road_straight",
     "road_right": "road_turn",
 }
+
 # ================= КАТЕГОРИИ =================
 SECTION_BTN_H = 36
 SECTION_BTN_W = PANEL_WIDTH - 30
@@ -178,7 +184,12 @@ CATEGORIES = {
     "floor": ["grass", "floor", "wood_floor", "stone", "concrete"],
     "roads": ["road", "road_right"]
 }
-SECTION_LABELS = {"cars": "Машины", "objects": "Объекты", "floor": "Пол", "roads": "Дороги"}
+SECTION_LABELS = {
+    "cars": "Машины",
+    "objects": "Объекты",
+    "floor": "Пол",
+    "roads": "Дороги"
+}
 
 dropdown_open_section = None
 last_dropdown_buttons = []
@@ -186,25 +197,25 @@ last_section_buttons = []
 last_save_rect = None
 last_load_rect = None
 last_reset_rect = None
-
+last_finish_rect = None
 
 def calc_dropdown_height(section_key):
     n = len(CATEGORIES[section_key])
     return DROPDOWN_TOP_PAD + n * DROPDOWN_ITEM_H + (n - 1) * DROPDOWN_ITEM_GAP + DROPDOWN_BOTTOM_PAD
-
 
 # ================= СЕТЬ =================
 def recv_exact(sock, size):
     data = b""
     while len(data) < size:
         chunk = sock.recv(size - len(data))
-        if not chunk: return None
+        if not chunk:
+            return None
         data += chunk
     return data
 
 client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 try:
-    print(f"🔄 Подключение к {SERVER_IP}:{SERVER_PORT}...")
+    print(f"Подключение к {SERVER_IP}:{SERVER_PORT}...")
     client.connect((SERVER_IP, SERVER_PORT))
     auth_data = {'type': 'AUTH', 'password': SERVER_PASSWORD, 'role': PLAYER_ROLE}
     msg = json.dumps(auth_data).encode('utf-8')
@@ -218,9 +229,9 @@ try:
     if auth_reply.get("type") != "AUTH_OK":
         raise RuntimeError(auth_reply.get("reason", "Ошибка авторизации"))
     client.settimeout(None)
-    print(f"✅ Авторизация успешна. Роль: {ROLE_LABELS.get(PLAYER_ROLE, PLAYER_ROLE)}")
+    print(f"Авторизация успешна. Роль: {ROLE_LABELS.get(PLAYER_ROLE, PLAYER_ROLE)}")
 except Exception as e:
-    print(f"❌ Ошибка подключения: {e}")
+    print(f"Ошибка подключения: {e}")
     pygame.quit()
     sys.exit()
 
@@ -228,23 +239,47 @@ def send_to_server(data):
     try:
         msg = json.dumps(data).encode('utf-8')
         client.sendall(struct.pack('>I', len(msg)) + msg)
-    except Exception: pass
+    except Exception:
+        pass
 
 def receive_thread():
-    global server_grid, edit_mode, running_sim
+    global server_grid, edit_mode, running_sim, running
     while True:
         try:
             raw = recv_exact(client, 4)
-            if not raw: break
+            if not raw:
+                break
             msglen = struct.unpack('>I', raw)[0]
             data = recv_exact(client, msglen)
-            if not data: break
+            if not data:
+                break
             state = json.loads(data.decode('utf-8'))
-            server_grid = state['grid']
-            edit_mode = state['edit_mode']
-            running_sim = state['running_sim']
+
+            msg_type = state.get('type', '')
+
+            if msg_type == 'STATE_UPDATE':
+                server_grid = state['grid']
+                edit_mode = state['edit_mode']
+                running_sim = state['running_sim']
+            elif msg_type == 'START_GAME':
+                # Хост тоже получает START_GAME — переходим в game_sandbox
+                print("[HOST] Получен START_GAME, переходим в game_sandbox...")
+                final_grid = state.get('grid')
+                pygame.quit()
+                env = os.environ.copy()
+                env["SERVER_IP"] = SERVER_IP
+                env["SERVER_PORT"] = str(SERVER_PORT)
+                env["SERVER_PASSWORD"] = SERVER_PASSWORD
+                env["PLAYER_ROLE"] = PLAYER_ROLE
+                if final_grid:
+                    env["INITIAL_GRID"] = json.dumps(final_grid)
+                subprocess.Popen(
+                    [sys.executable, os.path.join(BASE_DIR, "game_sandbox.py")],
+                    env=env
+                )
+                os._exit(0)
         except Exception:
-            print("❌ Связь с сервером потеряна")
+            print("Связь с сервером потеряна")
             os._exit(1)
 
 server_grid = [[[0, 0, "empty"] for _ in range(COLS)] for _ in range(ROWS)]
@@ -257,13 +292,17 @@ def fit_grid(grid, src_rows, src_cols):
     new_grid = [[[0, 0, "empty"] for _ in range(COLS)] for _ in range(ROWS)]
     for y in range(min(src_rows, ROWS)):
         for x in range(min(src_cols, COLS)):
-            try: new_grid[y][x] = grid[y][x]
-            except (IndexError, KeyError): pass
+            try:
+                new_grid[y][x] = grid[y][x]
+            except (IndexError, KeyError):
+                pass
     return new_grid
 
 def save_map():
     try:
-        root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
         filepath = filedialog.asksaveasfilename(
             defaultextension=".json",
             filetypes=[("JSON карты", "*.json"), ("Все файлы", "*.*")],
@@ -271,43 +310,54 @@ def save_map():
         )
         root.destroy()
     except Exception as e:
-        print(f"❌ Ошибка диалога сохранения: {e}"); return
-    if not filepath: return
+        print(f"Ошибка диалога сохранения: {e}")
+        return
+    if not filepath:
+        return
     try:
         map_data = {"version": 1, "cols": COLS, "rows": ROWS, "grid": server_grid}
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(map_data, f, ensure_ascii=False)
-        print(f"💾 Карта сохранена: {os.path.basename(filepath)}")
+        print(f"Карта сохранена: {os.path.basename(filepath)}")
     except Exception as e:
-        print(f"❌ Ошибка сохранения файла: {e}")
+        print(f"Ошибка сохранения файла: {e}")
 
 def load_map():
     try:
-        root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
         filepath = filedialog.askopenfilename(
             filetypes=[("JSON карты", "*.json"), ("Все файлы", "*.*")],
             initialdir=MAPS_DIR, title="Загрузить карту"
         )
         root.destroy()
     except Exception as e:
-        print(f"❌ Ошибка диалога загрузки: {e}"); return
-    if not filepath: return
+        print(f"Ошибка диалога загрузки: {e}")
+        return
+    if not filepath:
+        return
     try:
-        with open(filepath, 'r', encoding='utf-8') as f: map_data = json.load(f)
+        with open(filepath, 'r', encoding='utf-8') as f:
+            map_data = json.load(f)
         if isinstance(map_data, dict) and "grid" in map_data:
             grid = map_data["grid"]
-            src_cols, src_rows = map_data.get("cols", COLS), map_data.get("rows", ROWS)
+            src_cols = map_data.get("cols", COLS)
+            src_rows = map_data.get("rows", ROWS)
             if src_cols != COLS or src_rows != ROWS:
-                print(f"⚠️  Размер карты ({src_cols}×{src_rows}) отличается, подгоняю под {COLS}×{ROWS}")
+                print(f"Размер карты ({src_cols}x{src_rows}) отличается, подгоняю под {COLS}x{ROWS}")
                 grid = fit_grid(grid, src_rows, src_cols)
-        elif isinstance(map_data, list): grid = map_data
-        else: print("❌ Неизвестный формат файла"); return
+        elif isinstance(map_data, list):
+            grid = map_data
+        else:
+            print("Неизвестный формат файла")
+            return
         send_to_server({'type': 'LOAD_MAP', 'grid': grid})
-        print(f"📂 Карта {os.path.basename(filepath)} отправлена на сервер")
+        print(f"Карта {os.path.basename(filepath)} отправлена на сервер")
     except Exception as e:
-        print(f"❌ Ошибка загрузки файла: {e}")
+        print(f"Ошибка загрузки файла: {e}")
 
-# ================= ОТРИСОВКА =================
+# ================= ОТРИСОВКА ЯЧЕЕК =================
 def draw_textured_cell(surface, rect, fuel, intensity, ctype, gx, gy):
     x, y = rect.x, rect.y
 
@@ -324,7 +374,7 @@ def draw_textured_cell(surface, rect, fuel, intensity, ctype, gx, gy):
         if "road" in TEXTURES:
             surface.blit(TEXTURES["road"], (x, y))
         else:
-            pygame.draw.rect(surface, (60, 60, 65), (x, y, CELL*4, CELL*4))
+            pygame.draw.rect(surface, (60, 60, 65), (x, y, CELL * 4, CELL * 4))
         return
     elif ctype == "road_straight_part":
         return
@@ -333,7 +383,7 @@ def draw_textured_cell(surface, rect, fuel, intensity, ctype, gx, gy):
         if "road_right" in TEXTURES:
             surface.blit(TEXTURES["road_right"], (x, y))
         else:
-            pygame.draw.rect(surface, (60, 60, 65), (x, y, CELL*5, CELL*5))
+            pygame.draw.rect(surface, (60, 60, 65), (x, y, CELL * 5, CELL * 5))
         return
     elif ctype == "road_turn_part":
         return
@@ -394,10 +444,8 @@ def draw_grid():
             rect = pygame.Rect(x * CELL, y * CELL, CELL, CELL)
             draw_textured_cell(screen, rect, fuel, intensity, ctype, x, y)
 
-
-# >>>>>>>>>> ИЗМЕНЕНИЕ 3 (часть): Превью многоячеечного объекта <<<<<<<<<<
+# ================= ПРЕВЬЮ МНОГОЯЧЕЕЧНОГО ОБЪЕКТА =================
 def draw_multi_cell_preview():
-    """Рисует полупрозрачный прямоугольник-превью для многоячеечного инструмента."""
     if not edit_mode:
         return
     if current_tool not in MULTI_CELL_SIZES:
@@ -409,35 +457,30 @@ def draw_multi_cell_preview():
     gx, gy = mx // CELL, my // CELL
     w, h = MULTI_CELL_SIZES[current_tool]
 
-    # Проверяем, помещается ли объект в сетку
     fits = (0 <= gx <= COLS - w) and (0 <= gy <= ROWS - h)
 
     pw, ph = w * CELL, h * CELL
     preview_surf = pygame.Surface((pw, ph), pygame.SRCALPHA)
 
     if fits:
-        # Зелёноватая подсветка — можно поставить
         preview_surf.fill((100, 255, 100, 45))
         border_color = (80, 255, 80)
-        # Если есть текстура — рисуем полупрозрачный предпросмотр
         tex_key = current_tool
         if tex_key in TEXTURES:
             ghost = TEXTURES[tex_key].copy()
             ghost.set_alpha(120)
             preview_surf.blit(ghost, (0, 0))
     else:
-        # Красноватая — не помещается
         preview_surf.fill((255, 80, 80, 50))
         border_color = (255, 60, 60)
 
     screen.blit(preview_surf, (gx * CELL, gy * CELL))
-    pygame.draw.rect(screen, border_color,
-                     (gx * CELL, gy * CELL, pw, ph), 2)
+    pygame.draw.rect(screen, border_color, (gx * CELL, gy * CELL, pw, ph), 2)
 
-
+# ================= ОТРИСОВКА UI =================
 def draw_ui():
     global last_dropdown_buttons, last_section_buttons
-    global last_save_rect, last_load_rect, last_reset_rect
+    global last_save_rect, last_load_rect, last_reset_rect, last_finish_rect
 
     last_dropdown_buttons = []
     last_section_buttons = []
@@ -496,11 +539,10 @@ def draw_ui():
                     screen.blit(thumb, (item_rect.x + 6, item_rect.y + 3))
                     tx += 30
 
-                # >>>>>>>>>> Показываем размер для многоячеечных объектов <<<<<<<<<<
                 label = tool_names.get(item, item)
                 if item in MULTI_CELL_SIZES:
                     w, h = MULTI_CELL_SIZES[item]
-                    label += f" ({w}×{h})"
+                    label += f" ({w}x{h})"
 
                 screen.blit(small_font.render(label, True, (255, 255, 255)),
                             (tx, item_rect.y + 6))
@@ -515,6 +557,7 @@ def draw_ui():
 
         cur_y += SECTION_GAP
 
+    # --- Кнопки сохранения / загрузки ---
     cur_y += 16
     half_w = (PANEL_WIDTH - 30) // 2
 
@@ -533,6 +576,7 @@ def draw_ui():
     lt = small_font.render("Загрузить", True, (255, 255, 255))
     screen.blit(lt, lt.get_rect(center=last_load_rect.center))
 
+    # --- Кнопка очистить ---
     cur_y += 44
     last_reset_rect = pygame.Rect(GRID_WIDTH + 15, cur_y, PANEL_WIDTH - 30, 38)
 
@@ -542,14 +586,30 @@ def draw_ui():
     rt = small_font.render("ОЧИСТИТЬ ВСЁ", True, (255, 255, 255))
     screen.blit(rt, rt.get_rect(center=last_reset_rect.center))
 
-    # Подсказка внизу — добавляем информацию о текущем инструменте
+    # --- Кнопка завершить ---
+    cur_y += 50
+    last_finish_rect = pygame.Rect(GRID_WIDTH + 15, cur_y, PANEL_WIDTH - 30, 42)
+
+    hover_f = last_finish_rect.collidepoint(mouse_pos)
+    if hover_f:
+        finish_bg = (255, 180, 30)
+        finish_border = (255, 255, 100)
+    else:
+        finish_bg = (210, 140, 20)
+        finish_border = (180, 130, 50)
+
+    pygame.draw.rect(screen, finish_bg, last_finish_rect, border_radius=9)
+    pygame.draw.rect(screen, finish_border, last_finish_rect, width=2, border_radius=9)
+    ft = small_font.render("ЗАВЕРШИТЬ", True, (30, 30, 30))
+    screen.blit(ft, ft.get_rect(center=last_finish_rect.center))
+
+    # --- Подсказки внизу ---
     tool_label = tool_names.get(current_tool, current_tool)
     hint_tool = small_font.render(f"Инструмент: {tool_label}", True, (220, 230, 255))
     screen.blit(hint_tool, (20, HEIGHT - 48))
 
-    hint = small_font.render("SPACE — старт/пауза • R — сброс", True, (170, 180, 200))
+    hint = small_font.render("SPACE — старт/пауза | R — сброс", True, (170, 180, 200))
     screen.blit(hint, (20, HEIGHT - 26))
-
 
 # ================= ГЛАВНЫЙ ЦИКЛ =================
 running = True
@@ -557,14 +617,19 @@ while running:
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
+
         if event.type == pygame.KEYDOWN:
             mods = pygame.key.get_mods()
             if mods & pygame.KMOD_CTRL:
-                if event.key == pygame.K_s: save_map()
-                elif event.key == pygame.K_l: load_map()
+                if event.key == pygame.K_s:
+                    save_map()
+                elif event.key == pygame.K_l:
+                    load_map()
             else:
-                if event.key == pygame.K_SPACE: send_to_server({'type': 'SPACE'})
-                if event.key == pygame.K_r: send_to_server({'type': 'R'})
+                if event.key == pygame.K_SPACE:
+                    send_to_server({'type': 'SPACE'})
+                if event.key == pygame.K_r:
+                    send_to_server({'type': 'R'})
                 key_map = {
                     pygame.K_1: "grass", pygame.K_2: "tree", pygame.K_3: "lake",
                     pygame.K_4: "house", pygame.K_5: "wall", pygame.K_6: "floor",
@@ -574,9 +639,9 @@ while running:
                     pygame.K_q: "road",
                     pygame.K_e: "road_right"
                 }
-                if event.key in key_map: current_tool = key_map[event.key]
+                if event.key in key_map:
+                    current_tool = key_map[event.key]
 
-        # >>>>>>>>>> ИЗМЕНЕНИЕ 2: Обработка кликов — разделяем сетку и UI <<<<<<<<<<
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
 
@@ -587,19 +652,14 @@ while running:
                 if current_tool in MULTI_CELL_SIZES and edit_mode:
                     w, h = MULTI_CELL_SIZES[current_tool]
                     if 0 <= gx <= COLS - w and 0 <= gy <= ROWS - h:
-                        # >>>>>>>>>> КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ <<<<<<<<<<
                         server_tool = TOOL_SERVER_NAME.get(current_tool, current_tool)
                         send_to_server({
                             'type': 'CLICK',
                             'x': gx, 'y': gy,
-                            'tool': server_tool      # было current_tool
+                            'tool': server_tool
                         })
-                        print(f"🔧 Ставлю {current_tool} → сервер: {server_tool} "
-                            f"({w}×{h}) в ({gx}, {gy})")
                     else:
-                        print(f"⚠ Не помещается! {current_tool} ({w}×{h}) "
-                            f"в ({gx},{gy}), сетка {COLS}×{ROWS}")
-                # Одноячеечные объекты обрабатываются в непрерывном режиме ниже
+                        print(f"Не помещается! {current_tool} в ({gx},{gy})")
 
             # ---------- Клик по UI-ПАНЕЛИ ----------
             else:
@@ -625,30 +685,41 @@ while running:
                         if section == 'floor':
                             send_to_server({'type': 'FILL_BASE', 'tool': picked})
                         else:
-                            send_to_server({'type': 'SELECT_TOOL', 'tool': picked})
+                            server_tool = TOOL_SERVER_NAME.get(picked, picked)
+                            send_to_server({'type': 'SELECT_TOOL', 'tool': server_tool})
                         handled = True
                         break
                 if handled:
                     continue
 
                 if last_save_rect and last_save_rect.collidepoint(event.pos):
-                    save_map(); continue
+                    save_map()
+                    continue
                 if last_load_rect and last_load_rect.collidepoint(event.pos):
-                    load_map(); continue
+                    load_map()
+                    continue
                 if last_reset_rect and last_reset_rect.collidepoint(event.pos):
-                    send_to_server({'type': 'R'}); continue
+                    send_to_server({'type': 'R'})
+                    continue
+                if last_finish_rect and last_finish_rect.collidepoint(event.pos):
+                    print("Отправляем HOST_READY с финальной картой на сервер...")
+                    send_to_server({
+                        'type': 'HOST_READY',
+                        'final_grid': server_grid
+                    })
+                    continue
 
     # Непрерывное рисование — ТОЛЬКО для одноячеечных инструментов
     if edit_mode and pygame.mouse.get_pressed()[0]:
         mx, my = pygame.mouse.get_pos()
-        if mx < GRID_WIDTH and current_tool not in MULTI_CELL_SIZES:  # <── ИЗМЕНЕНИЕ
+        if mx < GRID_WIDTH and current_tool not in MULTI_CELL_SIZES:
             gx, gy = mx // CELL, my // CELL
             if 0 <= gx < COLS and 0 <= gy < ROWS:
                 send_to_server({'type': 'CLICK', 'x': gx, 'y': gy, 'tool': current_tool})
 
     screen.fill((12, 22, 45))
     draw_grid()
-    draw_multi_cell_preview()   # <── ИЗМЕНЕНИЕ: рисуем превью перед UI
+    draw_multi_cell_preview()
     draw_ui()
     pygame.display.flip()
     clock.tick(FPS)
