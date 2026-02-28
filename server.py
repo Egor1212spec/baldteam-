@@ -4,12 +4,18 @@ import json
 import struct
 import time
 import random
+import os
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
 
 # ================= НАСТРОЙКИ СЕРВЕРА =================
 HOST = '0.0.0.0'
 PORT = 5555
-MAX_PLAYERS = 8
-SERVER_PASSWORD = "my_super_password"   # ← измени на свой!
+MAX_PLAYERS = 5
+SERVER_PASSWORD = "my_super_password" # <--- УСТАНОВИ СВОЙ ПАРОЛЬ ЗДЕСЬ
 
 COLS = 60
 ROWS = 44
@@ -223,6 +229,7 @@ def update_fire():
 
 # ================= СЕТЬ =================
 clients = []
+client_roles = {}
 grid_lock = threading.Lock()
 
 def send_msg(sock, data):
@@ -245,10 +252,29 @@ def client_thread(conn, addr):
         if auth.get('type') != 'AUTH' or auth.get('password') != SERVER_PASSWORD:
             print(f"[-] Неверный пароль от {addr}")
             return
-
-        print(f"[+] {addr} успешно авторизован")
+            
+        data = b''
+        while len(data) < msglen:
+            packet = conn.recv(msglen - len(data))
+            if not packet: return
+            data += packet
+            
+        auth_cmd = json.loads(data.decode('utf-8'))
+        
+        # ПРОВЕРКА ПАРОЛЯ
+        if auth_cmd.get('type') != 'AUTH' or auth_cmd.get('password') != SERVER_PASSWORD:
+            print(f"[-] Неверный пароль от {addr}. Отключаем.")
+            return # Выходим, код идет в блок finally и закрывает соединение
+            
+        print(f"[+] Игрок {addr} ввел верный пароль и вошел в игру!")
+        
+        # Снимаем таймер (во время игры можно ничего не присылать)
+        conn.settimeout(None)
+        
+        # Только теперь добавляем в список активных игроков
         clients.append(conn)
-
+        
+        # ОСНОВНОЙ ЦИКЛ ОБРАБОТКИ ИГРЫ
         while True:
             raw_msglen = conn.recv(4)
             if not raw_msglen: break
@@ -297,6 +323,8 @@ def client_thread(conn, addr):
     finally:
         if conn in clients:
             clients.remove(conn)
+        if conn in client_roles:
+            del client_roles[conn]
         conn.close()
         print(f"[-] {addr} отключился")
 
@@ -325,10 +353,10 @@ server.listen(MAX_PLAYERS)
 print(f"🌲 Сервер запущен на {HOST}:{PORT} | Пароль: {SERVER_PASSWORD}")
 
 threading.Thread(target=game_loop, daemon=True).start()
-
 while True:
     conn, addr = server.accept()
-    if len(clients) < MAX_PLAYERS:
-        threading.Thread(target=client_thread, args=(conn, addr), daemon=True).start()
-    else:
+    if len(clients) >= MAX_PLAYERS:
         conn.close()
+    else:
+        # Теперь мы НЕ добавляем в список клиентов сразу, а передаем в поток для проверки пароля
+        threading.Thread(target=client_thread, args=(conn, addr), daemon=True).start()
