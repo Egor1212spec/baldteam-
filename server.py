@@ -4,6 +4,7 @@ import json
 import struct
 import time
 import random
+import math
 import os
 
 try:
@@ -22,12 +23,14 @@ SERVER_PASSWORD = os.getenv("SERVER_PASSWORD", "my_super_password")
 
 COLS = 60
 ROWS = 44
-UPDATE_EVERY = 6
+UPDATE_EVERY = 60
+SUPPLY_HOSE_MAX = 15
 
 TRUCKS = [
     "АЦ-40", "АЦ-3,2-40/4", "АЦ-6,0-40", "ПНС-110",
     "АР-2", "АНР-3,0-100", "АЛ-30", "АЛ-50"
 ]
+
 
 class Cell:
     def __init__(self):
@@ -38,40 +41,56 @@ class Cell:
         self.moisture = 22.0
         self.state = "unburned"
 
+
 grid = [[Cell() for _ in range(COLS)] for _ in range(ROWS)]
 edit_mode = True
 running_sim = False
 frame = 0
 available_trucks = []
+server_firefighters = []
+supply_connections = []  # [[tx, ty, sx, sy], ...]
+
+clients = []
+client_roles = {}
+grid_lock = threading.Lock()
+
+ALLOWED_ROLES = {"rtp", "nsh", "br", "dispatcher"}
 
 WIND = (1, -3)
 WIND_STRENGTH = 2.15
 
 FUEL_PROPERTIES = {
-    "grass":    {"ign_temp": 42, "burn_rate": 3.8, "heat_gen": 58,  "spread_mult": 1.85},
-    "trunk":    {"ign_temp": 65, "burn_rate": 0.72, "heat_gen": 52, "spread_mult": 1.45},
-    "foliage":  {"ign_temp": 38, "burn_rate": 4.2, "heat_gen": 138, "spread_mult": 0.8},
-    "wall":     {"ign_temp": 72, "burn_rate": 0.95,"heat_gen": 78, "spread_mult": 0.7},
-    "floor":    {"ign_temp": 48, "burn_rate": 2.2, "heat_gen": 70, "spread_mult": 1.4},
-    "stone":    {"ign_temp": 9999,"burn_rate": 0,   "heat_gen": 0,   "spread_mult": 0},
-    "water":    {"ign_temp": 9999,"burn_rate": 0,   "heat_gen": 0,   "spread_mult": 0},
-    "concrete": {"ign_temp": 9999, "burn_rate": 0,   "heat_gen": 0,   "spread_mult": 0},
-    "hydrant":  {"ign_temp": 140,   "burn_rate": 0.4, "heat_gen": 35,  "spread_mult": 0.3},
-    "wood_floor":{"ign_temp": 45,   "burn_rate": 2.8, "heat_gen": 75,  "spread_mult": 1.6},
-    "firecar_root": {"ign_temp": 9999, "burn_rate": 0, "heat_gen": 0, "spread_mult": 0},
-    "firecar_part": {"ign_temp": 9999, "burn_rate": 0, "heat_gen": 0, "spread_mult": 0},
-    "road_turn_root":     {"ign_temp": 9999, "burn_rate": 0, "heat_gen": 0, "spread_mult": 0},
-    "road_turn_part":     {"ign_temp": 9999, "burn_rate": 0, "heat_gen": 0, "spread_mult": 0},
+    "grass":          {"ign_temp": 42,   "burn_rate": 3.8,  "heat_gen": 58,   "spread_mult": 1.85},
+    "trunk":          {"ign_temp": 65,   "burn_rate": 0.72, "heat_gen": 52,   "spread_mult": 1.45},
+    "foliage":        {"ign_temp": 38,   "burn_rate": 4.2,  "heat_gen": 138,  "spread_mult": 0.8},
+    "wall":           {"ign_temp": 72,   "burn_rate": 0.95, "heat_gen": 78,   "spread_mult": 0.7},
+    "floor":          {"ign_temp": 48,   "burn_rate": 2.2,  "heat_gen": 70,   "spread_mult": 1.4},
+    "stone":          {"ign_temp": 9999, "burn_rate": 0,    "heat_gen": 0,    "spread_mult": 0},
+    "water":          {"ign_temp": 9999, "burn_rate": 0,    "heat_gen": 0,    "spread_mult": 0},
+    "concrete":       {"ign_temp": 9999, "burn_rate": 0,    "heat_gen": 0,    "spread_mult": 0},
+    "hydrant":        {"ign_temp": 140,  "burn_rate": 0.4,  "heat_gen": 35,   "spread_mult": 0.3},
+    "wood_floor":     {"ign_temp": 45,   "burn_rate": 2.8,  "heat_gen": 75,   "spread_mult": 1.6},
+    "firecar_root":   {"ign_temp": 9999, "burn_rate": 0,    "heat_gen": 0,    "spread_mult": 0},
+    "firecar_part":   {"ign_temp": 9999, "burn_rate": 0,    "heat_gen": 0,    "spread_mult": 0},
+    "road_turn_root": {"ign_temp": 9999, "burn_rate": 0,    "heat_gen": 0,    "spread_mult": 0},
+    "road_turn_part": {"ign_temp": 9999, "burn_rate": 0,    "heat_gen": 0,    "spread_mult": 0},
 }
 
+
+def get_props(cell_type):
+    return FUEL_PROPERTIES.get(cell_type, FUEL_PROPERTIES["grass"])
+
+
 def place_stamp(x, y, tool):
-    if not (0 <= x < COLS and 0 <= y < ROWS): return
+    if not (0 <= x < COLS and 0 <= y < ROWS):
+        return
 
     if tool == "tree":
         trunk_height = 12
         for dy in range(trunk_height):
             ny = y + dy
-            if ny >= ROWS: break
+            if ny >= ROWS:
+                break
             c = grid[ny][x]
             c.type = "trunk"
             c.fuel = random.randint(175, 235)
@@ -79,17 +98,20 @@ def place_stamp(x, y, tool):
             c.heat = 0.0
             c.state = "unburned"
             c.intensity = 0
-
         crown_base = y + trunk_height - 6
         for layer in range(8):
             radius = 7 - layer // 2
             for dy in range(-radius - 1, radius + 2):
                 for dx in range(-radius - 1, radius + 2):
-                    if abs(dx) + abs(dy) > radius + random.random() * 1.8: continue
-                    nx, ny = x + dx, crown_base - layer + dy
-                    if not (0 <= nx < COLS and 0 <= ny < ROWS): continue
-                    c = grid[ny][nx]
-                    if c.type == "trunk": continue
+                    if abs(dx) + abs(dy) > radius + random.random() * 1.8:
+                        continue
+                    nx2 = x + dx
+                    ny2 = crown_base - layer + dy
+                    if not (0 <= nx2 < COLS and 0 <= ny2 < ROWS):
+                        continue
+                    c = grid[ny2][nx2]
+                    if c.type == "trunk":
+                        continue
                     c.type = "foliage"
                     c.fuel = random.randint(68, 118)
                     c.moisture = random.uniform(28, 48)
@@ -100,9 +122,10 @@ def place_stamp(x, y, tool):
     elif tool == "grass":
         for dx in range(-1, 2):
             for dy in range(-1, 2):
-                nx, ny = x + dx, y + dy
-                if 0 <= nx < COLS and 0 <= ny < ROWS:
-                    c = grid[ny][nx]
+                nx2 = x + dx
+                ny2 = y + dy
+                if 0 <= nx2 < COLS and 0 <= ny2 < ROWS:
+                    c = grid[ny2][nx2]
                     c.type = "grass"
                     c.fuel = random.randint(28, 55)
                     c.moisture = random.uniform(18, 35)
@@ -113,10 +136,11 @@ def place_stamp(x, y, tool):
         size = 9
         for dy in range(-size, size + 1):
             for dx in range(-size, size + 1):
-                if dx*dx + dy*dy <= size*size + random.randint(-5, 5):
-                    nx, ny = x + dx, y + dy
-                    if 0 <= nx < COLS and 0 <= ny < ROWS:
-                        c = grid[ny][nx]
+                if dx * dx + dy * dy <= size * size + random.randint(-5, 5):
+                    nx2 = x + dx
+                    ny2 = y + dy
+                    if 0 <= nx2 < COLS and 0 <= ny2 < ROWS:
+                        c = grid[ny2][nx2]
                         c.type = "water"
                         c.fuel = 0
                         c.intensity = 0
@@ -126,10 +150,11 @@ def place_stamp(x, y, tool):
     elif tool == "house":
         for dy in range(-6, 7):
             for dx in range(-9, 10):
-                nx, ny = x + dx, y + dy
-                if 0 <= nx < COLS and 0 <= ny < ROWS:
-                    c = grid[ny][nx]
-                    if abs(dy) in (6, -6) or abs(dx) in (9, -9):
+                nx2 = x + dx
+                ny2 = y + dy
+                if 0 <= nx2 < COLS and 0 <= ny2 < ROWS:
+                    c = grid[ny2][nx2]
+                    if abs(dy) == 6 or abs(dx) == 9:
                         c.type = "wall"
                         c.fuel = random.randint(200, 255)
                     else:
@@ -236,35 +261,59 @@ def place_stamp(x, y, tool):
                     c.state = "burned"
             if tool in available_trucks:
                 available_trucks.remove(tool)
-                broadcast({'type': 'TRUCK_AVAILABLE', 'available': available_trucks[:]})
+                broadcast({"type": "TRUCK_AVAILABLE",
+                           "available": available_trucks[:]})
+
+
+def extinguish_cells(cells, power):
+    for ci in cells:
+        cx = ci.get("x", -1)
+        cy = ci.get("y", -1)
+        if 0 <= cx < COLS and 0 <= cy < ROWS:
+            c = grid[cy][cx]
+            c.intensity = max(0, c.intensity - power * 12)
+            c.heat = max(0, c.heat - power * 40)
+            c.moisture = min(100, c.moisture + power * 20)
+            c.fuel = max(0, c.fuel - power * 3)
+            if c.intensity <= 0:
+                c.intensity = 0
+                c.heat = 0
+                c.state = "smoldering"
+
 
 def update_fire():
-    if not running_sim: return
+    if not running_sim:
+        return
 
-    heat_map = [[0.0 for _ in range(COLS)] for _ in range(ROWS)]
+    heat_map = [[0.0] * COLS for _ in range(ROWS)]
 
     for y in range(ROWS):
         for x in range(COLS):
             c = grid[y][x]
             heat_map[y][x] = c.heat * 0.67
-
-            if c.intensity <= 8: continue
-
-            props = FUEL_PROPERTIES.get(c.type, FUEL_PROPERTIES["grass"])
-            heat_out = props["heat_gen"] * (c.intensity / 55)
+            if c.intensity <= 8:
+                continue
+            props = get_props(c.type)
+            heat_out = props["heat_gen"] * (c.intensity / 55.0)
 
             for dy in range(-4, 5):
                 for dx in range(-4, 5):
-                    if dx == 0 and dy == 0: continue
-                    nx, ny = x + dx, y + dy
-                    if not (0 <= nx < COLS and 0 <= ny < ROWS): continue
-
+                    if dx == 0 and dy == 0:
+                        continue
+                    nx2 = x + dx
+                    ny2 = y + dy
+                    if nx2 < 0 or nx2 >= COLS or ny2 < 0 or ny2 >= ROWS:
+                        continue
                     dist = max(1.0, (abs(dx) + abs(dy)) ** 0.72)
                     heat = heat_out / dist
                     wind_bias = (dx * WIND[0] + dy * WIND[1]) * WIND_STRENGTH * 0.65
-                    vertical_bias = 3.2 if dy < 0 else 0.55
-
-                    heat_map[ny][nx] += heat + wind_bias * vertical_bias
+                    if dy < 0:
+                        vb = 1.5
+                    elif dy > 0:
+                        vb = 1.0
+                    else:
+                        vb = 1.2
+                    heat_map[ny2][nx2] += (heat + wind_bias) * vb
 
             c.fuel = max(0, c.fuel - props["burn_rate"] * (c.intensity / 80.0))
             c.intensity = max(0, c.intensity - 0.4)
@@ -275,27 +324,26 @@ def update_fire():
             if c.type == "water":
                 c.heat = 0
                 continue
-
             c.heat = heat_map[y][x]
-
+            if c.moisture > 50:
+                c.heat *= 0.85
             if c.state in ("unburned", "smoldering") and c.fuel > 16:
-                props = FUEL_PROPERTIES.get(c.type, FUEL_PROPERTIES["grass"])
+                props = get_props(c.type)
                 ign_temp = props["ign_temp"]
-
                 if c.type == "foliage":
-                    burning_trunk_near = False
-                    for check_y in range(y + 1, min(ROWS, y + 7)):
-                        for check_x in range(max(0, x-2), min(COLS, x+3)):
-                            if grid[check_y][check_x].type == "trunk" and grid[check_y][check_x].intensity > 15:
-                                burning_trunk_near = True
+                    bt = False
+                    for cy2 in range(y + 1, min(ROWS, y + 7)):
+                        for cx2 in range(max(0, x - 2), min(COLS, x + 3)):
+                            tc = grid[cy2][cx2]
+                            if tc.type == "trunk" and tc.intensity > 15:
+                                bt = True
                                 break
-                        if burning_trunk_near: break
-                    if not burning_trunk_near:
+                        if bt:
+                            break
+                    if not bt:
                         ign_temp *= 2.85
-
-                final_ign_temp = ign_temp * (1 + c.moisture / 130)
-
-                if c.heat > final_ign_temp:
+                final_ign = ign_temp * (1.0 + c.moisture / 80.0)
+                if c.heat > final_ign:
                     c.intensity = random.randint(33, 59)
                     c.state = "burning"
                     c.moisture = max(0, c.moisture - 24)
@@ -308,14 +356,9 @@ def update_fire():
                 if c.state != "burned":
                     c.state = "smoldering" if c.fuel > 3 else "burned"
                 c.heat *= 0.52
+            if c.moisture > 22:
+                c.moisture -= 0.3
 
-clients = []
-client_roles = {}
-grid_lock = threading.Lock()
-ALLOWED_ROLES = {"rtp", "nsh", "br", "dispatcher"}
-ROLE_LABELS = {
-    "rtp": "РТП", "nsh": "НШ", "br": "БР", "dispatcher": "Диспетчер",
-}
 
 def recv_exact(sock, size):
     data = b""
@@ -326,81 +369,105 @@ def recv_exact(sock, size):
         data += chunk
     return data
 
+
 def send_msg(sock, data):
     try:
-        msg = json.dumps(data).encode('utf-8')
-        sock.sendall(struct.pack('>I', len(msg)) + msg)
-    except:
+        msg = json.dumps(data).encode("utf-8")
+        sock.sendall(struct.pack(">I", len(msg)) + msg)
+    except Exception:
         pass
 
+
 def broadcast(data):
-    payload = json.dumps(data).encode('utf-8')
-    packet = struct.pack('>I', len(payload)) + payload
+    payload = json.dumps(data).encode("utf-8")
+    packet = struct.pack(">I", len(payload)) + payload
+    dead = []
     for c in clients[:]:
         try:
             c.sendall(packet)
         except Exception:
-            if c in clients:
-                clients.remove(c)
-            if c in client_roles:
-                del client_roles[c]
+            dead.append(c)
+    for c in dead:
+        if c in clients:
+            clients.remove(c)
+        if c in client_roles:
+            del client_roles[c]
+
 
 def client_thread(conn, addr):
     global edit_mode, running_sim, grid
-    print(f"[?] Попытка входа от: {addr}")
+    addr_str = str(addr)
 
     try:
         conn.settimeout(10.0)
-        raw_msglen = recv_exact(conn, 4)
-        if not raw_msglen: return
-        msglen = struct.unpack('>I', raw_msglen)[0]
-        data = recv_exact(conn, msglen)
-        if not data: return
-
-        auth = json.loads(data.decode('utf-8'))
-        if auth.get('type') != 'AUTH' or auth.get('password') != SERVER_PASSWORD:
-            send_msg(conn, {'type': 'AUTH_FAIL', 'reason': 'Неверный пароль'})
+        raw_len = recv_exact(conn, 4)
+        if not raw_len:
+            conn.close()
+            return
+        msg_len = struct.unpack(">I", raw_len)[0]
+        raw_data = recv_exact(conn, msg_len)
+        if not raw_data:
+            conn.close()
             return
 
-        role = auth.get('role', '').lower()
+        auth = json.loads(raw_data.decode("utf-8"))
+        if auth.get("type") != "AUTH" or auth.get("password") != SERVER_PASSWORD:
+            send_msg(conn, {"type": "AUTH_FAIL", "reason": "Bad password"})
+            conn.close()
+            return
+
+        role = auth.get("role", "").lower()
         if role not in ALLOWED_ROLES:
-            send_msg(conn, {'type': 'AUTH_FAIL', 'reason': 'Недопустимая роль'})
+            send_msg(conn, {"type": "AUTH_FAIL", "reason": "Bad role"})
+            conn.close()
             return
 
-        send_msg(conn, {'type': 'AUTH_OK', 'role': role})
+        send_msg(conn, {"type": "AUTH_OK", "role": role})
         conn.settimeout(None)
 
         with grid_lock:
             clients.append(conn)
             client_roles[conn] = role
 
-        print(f"[+] {addr} вошёл | Игроков: {len(clients)}")
+        print("[+] {} joined as {} | Players: {}".format(
+            addr, role, len(clients)))
 
         with grid_lock:
-            net_grid = [[[c.fuel, c.intensity, c.type] for c in row] for row in grid]
+            net_grid = [[[c.fuel, c.intensity, c.type] for c in row]
+                        for row in grid]
             send_msg(conn, {
-                'type': 'STATE_UPDATE',
-                'grid': net_grid,
-                'edit_mode': edit_mode,
-                'running_sim': running_sim
+                "type": "STATE_UPDATE",
+                "grid": net_grid,
+                "edit_mode": edit_mode,
+                "running_sim": running_sim,
+                "available_trucks": available_trucks[:],
+                "firefighters": server_firefighters[:],
+                "supply_hoses": supply_connections[:]
             })
 
         while True:
-            raw_msglen = recv_exact(conn, 4)
-            if not raw_msglen: break
-            msglen = struct.unpack('>I', raw_msglen)[0]
-            data = recv_exact(conn, msglen)
-            if not data: break
+            raw_len = recv_exact(conn, 4)
+            if not raw_len:
+                break
+            msg_len = struct.unpack(">I", raw_len)[0]
+            raw_data = recv_exact(conn, msg_len)
+            if not raw_data:
+                break
 
-            cmd = json.loads(data.decode('utf-8'))
-            cmd_type = cmd.get('type')
+            try:
+                cmd = json.loads(raw_data.decode("utf-8"))
+            except Exception:
+                continue
+
+            cmd_type = cmd.get("type", "")
 
             with grid_lock:
-                if cmd_type == 'CLICK':
-                    place_stamp(cmd['x'], cmd['y'], cmd['tool'])
+                if cmd_type == "CLICK":
+                    place_stamp(cmd.get("x", 0), cmd.get("y", 0),
+                                cmd.get("tool", ""))
 
-                elif cmd_type == 'FILL_BASE':
-                    tool = cmd['tool']
+                elif cmd_type == "FILL_BASE":
+                    tool = cmd.get("tool", "")
                     for yy in range(ROWS):
                         for xx in range(COLS):
                             c = grid[yy][xx]
@@ -422,109 +489,223 @@ def client_thread(conn, addr):
                                 c.moisture = 25 if tool == "grass" else 15
                                 c.state = "unburned"
 
-                elif cmd_type == 'SPACE':
+                elif cmd_type == "SPACE":
                     if edit_mode:
                         edit_mode = False
                         running_sim = True
                     else:
                         running_sim = not running_sim
 
-                elif cmd_type == 'R':
+                elif cmd_type == "R":
                     grid = [[Cell() for _ in range(COLS)] for _ in range(ROWS)]
                     edit_mode = True
                     running_sim = False
+                    supply_connections.clear()
 
-                elif cmd_type == 'LOAD_MAP':
-                    received_grid = cmd.get('grid')
-                    if received_grid and len(received_grid) == ROWS and all(len(row) == COLS for row in received_grid):
-                        for yy in range(ROWS):
-                            for xx in range(COLS):
-                                cell_data = received_grid[yy][xx]
-                                c = grid[yy][xx]
-                                c.fuel = cell_data[0]
-                                c.intensity = cell_data[1]
-                                c.type = cell_data[2]
-                                c.heat = 0.0
-                                c.moisture = 15.0
-                                c.state = "burning" if cell_data[1] > 0 else "unburned"
-                        edit_mode = True
-                        running_sim = False
+                elif cmd_type == "LOAD_MAP":
+                    received = cmd.get("grid")
+                    if received and len(received) == ROWS:
+                        ok = all(len(row) == COLS for row in received)
+                        if ok:
+                            for yy in range(ROWS):
+                                for xx in range(COLS):
+                                    cd = received[yy][xx]
+                                    c = grid[yy][xx]
+                                    c.fuel = cd[0]
+                                    c.intensity = cd[1]
+                                    c.type = cd[2]
+                                    c.heat = 0.0
+                                    c.moisture = 15.0
+                                    c.state = ("burning" if cd[1] > 0
+                                               else "unburned")
+                            edit_mode = True
+                            running_sim = False
+                            supply_connections.clear()
 
-                elif cmd_type == 'HOST_READY':
-                    final_grid = cmd.get('final_grid')
-                    if final_grid and len(final_grid) == ROWS and all(len(row) == COLS for row in final_grid):
-                        for y in range(ROWS):
-                            for x in range(COLS):
-                                fuel, intensity, ctype = final_grid[y][x]
-                                c = grid[y][x]
-                                c.fuel = fuel
-                                c.intensity = intensity
-                                c.type = ctype
-                                c.heat = 0
-                                c.moisture = 22 if ctype in ("grass", "tree") else 0
-                                c.state = "unburned" if intensity == 0 else "burning"
+                elif cmd_type == "HOST_READY":
+                    fg = cmd.get("final_grid")
+                    if fg and len(fg) == ROWS:
+                        ok = all(len(row) == COLS for row in fg)
+                        if ok:
+                            for yy in range(ROWS):
+                                for xx in range(COLS):
+                                    fuel, intensity, ctype = fg[yy][xx]
+                                    c = grid[yy][xx]
+                                    c.fuel = fuel
+                                    c.intensity = intensity
+                                    c.type = ctype
+                                    c.heat = 0
+                                    c.moisture = (22 if ctype in
+                                                  ("grass", "tree") else 0)
+                                    c.state = ("unburned" if intensity == 0
+                                               else "burning")
+                            edit_mode = False
+                            running_sim = False
+                            supply_connections.clear()
+                            broadcast({
+                                "type": "START_GAME",
+                                "grid": fg,
+                                "message": "Game started!"
+                            })
 
-                        edit_mode = False
-                        running_sim = False 
-
-                        broadcast({
-                            'type': 'START_GAME',
-                            'grid': final_grid,
-                            'message': 'Игра началась!'
-                        })
-
-                elif cmd_type == 'DEPLOY_TRUCK':
-                    truck = cmd.get('truck')
+                elif cmd_type == "DEPLOY_TRUCK":
+                    truck = cmd.get("truck")
                     if truck and truck in TRUCKS:
                         available_trucks.append(truck)
-                        broadcast({'type': 'TRUCK_AVAILABLE', 'truck': truck, 'available': available_trucks[:]})
-                        print(f"[SERVER] Диспетчер отправил {truck}")
+                        broadcast({
+                            "type": "TRUCK_AVAILABLE",
+                            "truck": truck,
+                            "available": available_trucks[:]
+                        })
 
-                elif cmd_type == 'PLACE_TRUCK':
-                    place_stamp(cmd['x'], cmd['y'], cmd['truck'])
+                elif cmd_type == "PLACE_TRUCK":
+                    place_stamp(cmd.get("x", 0), cmd.get("y", 0),
+                                cmd.get("truck", ""))
+
+                elif cmd_type == "SPAWN_FIREFIGHTER":
+                    server_firefighters.append({
+                        "id": cmd.get("id", 0),
+                        "x": cmd.get("x", 0),
+                        "y": cmd.get("y", 0),
+                        "owner": addr_str
+                    })
+
+                elif cmd_type == "MOVE_FIREFIGHTER":
+                    ff_id = cmd.get("id")
+                    for ff in server_firefighters:
+                        if ff["id"] == ff_id and ff["owner"] == addr_str:
+                            ff["x"] = cmd.get("x", 0)
+                            ff["y"] = cmd.get("y", 0)
+                            break
+
+                elif cmd_type == "MOVE_UNIT":
+                    uid = cmd.get("id")
+                    for ff in server_firefighters:
+                        if ff["id"] == uid:
+                            ff["x"] = cmd.get("x", 0)
+                            ff["y"] = cmd.get("y", 0)
+                            break
+
+                elif cmd_type == "EXTINGUISH":
+                    extinguish_cells(cmd.get("cells", []),
+                                     cmd.get("power", 3))
+
+                elif cmd_type == "LAY_SUPPLY_HOSE":
+                    tx = cmd.get("tx", 0)
+                    ty = cmd.get("ty", 0)
+                    sx = cmd.get("sx", 0)
+                    sy = cmd.get("sy", 0)
+
+                    already = False
+                    for sc in supply_connections:
+                        if sc[0] == tx and sc[1] == ty:
+                            already = True
+                            break
+
+                    if not already:
+                        dist = math.sqrt((sx - tx) ** 2 + (sy - ty) ** 2)
+                        valid_source = False
+                        if (0 <= sx < COLS and 0 <= sy < ROWS):
+                            ct = grid[sy][sx].type
+                            if ct in ("water", "hydrant"):
+                                valid_source = True
+
+                        if valid_source and dist <= SUPPLY_HOSE_MAX:
+                            supply_connections.append([tx, ty, sx, sy])
+                            send_msg(conn, {
+                                "type": "SUPPLY_OK",
+                                "tx": tx, "ty": ty,
+                                "sx": sx, "sy": sy
+                            })
+                            print("[+] Supply hose: truck({},{}) -> {}({},{})".format(
+                                tx, ty, grid[sy][sx].type, sx, sy))
+                        else:
+                            send_msg(conn, {
+                                "type": "SUPPLY_FAIL",
+                                "tx": tx, "ty": ty,
+                                "reason": "Too far or no water source"
+                            })
+
+                elif cmd_type == "DISCONNECT_SUPPLY":
+                    tx = cmd.get("tx", 0)
+                    ty = cmd.get("ty", 0)
+                    to_rm = []
+                    for sc in supply_connections:
+                        if sc[0] == tx and sc[1] == ty:
+                            to_rm.append(sc)
+                    for sc in to_rm:
+                        supply_connections.remove(sc)
+                    print("[-] Supply hose disconnected: ({},{})".format(
+                        tx, ty))
 
     except Exception as e:
-        print(f"[!] Ошибка клиента {addr}: {e}")
+        print("[!] Error {}: {}".format(addr, e))
     finally:
-        if conn in clients: clients.remove(conn)
-        if conn in client_roles: del client_roles[conn]
-        conn.close()
+        to_rm = [ff for ff in server_firefighters
+                 if ff.get("owner") == addr_str]
+        for ff in to_rm:
+            server_firefighters.remove(ff)
+        if conn in clients:
+            clients.remove(conn)
+        if conn in client_roles:
+            del client_roles[conn]
+        try:
+            conn.close()
+        except Exception:
+            pass
+        print("[-] {} left | Players: {}".format(addr, len(clients)))
+
 
 def game_loop():
     global frame
     while True:
-        with grid_lock:
-            if running_sim and frame % UPDATE_EVERY == 0:
-                try:
-                    update_fire()
-                except Exception as e:
-                    print(f"Ошибка симуляции: {e}")
-            frame += 1
+        try:
+            with grid_lock:
+                if running_sim and frame % UPDATE_EVERY == 0:
+                    try:
+                        update_fire()
+                    except Exception as e:
+                        print("Fire error: {}".format(e))
+                frame += 1
 
-            net_grid = [[[c.fuel, c.intensity, c.type] for c in row] for row in grid]
-            state = {
-                'type': 'STATE_UPDATE',
-                'grid': net_grid,
-                'edit_mode': edit_mode,
-                'running_sim': running_sim,
-                'available_trucks': available_trucks[:]
-            }
+                net_grid = [[[c.fuel, c.intensity, c.type] for c in row]
+                            for row in grid]
+                state = {
+                    "type": "STATE_UPDATE",
+                    "grid": net_grid,
+                    "edit_mode": edit_mode,
+                    "running_sim": running_sim,
+                    "available_trucks": available_trucks[:],
+                    "firefighters": server_firefighters[:],
+                    "supply_hoses": supply_connections[:]
+                }
+            broadcast(state)
+        except Exception as e:
+            print("Loop error: {}".format(e))
 
-        broadcast(state)
-        time.sleep(1 / 33)
+        time.sleep(1.0 / 33.0)
 
-server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-server.bind((HOST, PORT))
-server.listen(MAX_PLAYERS)
 
-print(f"Сервер запущен на {HOST}:{PORT}")
+if __name__ == "__main__":
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((HOST, PORT))
+    server.listen(MAX_PLAYERS)
 
-threading.Thread(target=game_loop, daemon=True).start()
+    print("Server on {}:{}".format(HOST, PORT))
+    print("Fire: UPDATE_EVERY={}".format(UPDATE_EVERY))
+    print("Supply hose max: {} cells".format(SUPPLY_HOSE_MAX))
 
-while True:
-    conn, addr = server.accept()
-    if len(clients) >= MAX_PLAYERS:
-        conn.close()
-    else:
-        threading.Thread(target=client_thread, args=(conn, addr), daemon=True).start()
+    threading.Thread(target=game_loop, daemon=True).start()
+
+    while True:
+        try:
+            conn, addr = server.accept()
+            if len(clients) >= MAX_PLAYERS:
+                conn.close()
+            else:
+                threading.Thread(target=client_thread,
+                                 args=(conn, addr),
+                                 daemon=True).start()
+        except Exception as e:
+            print("Accept error: {}".format(e))
