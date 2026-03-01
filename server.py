@@ -18,7 +18,7 @@ if load_dotenv is not None:
 
 HOST = os.getenv("SERVER_HOST", "127.0.0.1")
 PORT = int(os.getenv("SERVER_PORT", "5555"))
-MAX_PLAYERS = int(os.getenv("MAX_PLAYERS", "6"))  # 1 хост + 5 игроков
+MAX_PLAYERS = int(os.getenv("MAX_PLAYERS", "6"))
 SERVER_PASSWORD = os.getenv("SERVER_PASSWORD", "my_super_password")
 
 COLS = 60
@@ -40,7 +40,6 @@ edit_mode = True
 running_sim = False
 frame = 0
 
-# ================= РЕАЛИСТИЧНЫЕ ПАРАМЕТРЫ =================
 WIND = (1, -3)
 WIND_STRENGTH = 2.15
 
@@ -65,7 +64,6 @@ def place_stamp(x, y, tool):
     if not (0 <= x < COLS and 0 <= y < ROWS): return
 
     if tool == "tree":
-        # СТВОЛ
         trunk_height = 12
         for dy in range(trunk_height):
             ny = y + dy
@@ -78,7 +76,6 @@ def place_stamp(x, y, tool):
             c.state = "unburned"
             c.intensity = 0
 
-        # КРОНА
         crown_base = y + trunk_height - 6
         for layer in range(8):
             radius = 7 - layer // 2
@@ -161,10 +158,13 @@ def place_stamp(x, y, tool):
 
     elif tool == "ignite":
         c = grid[y][x]
+        if c.fuel <= 10:
+            c.fuel = 60 # Искусственное топливо, чтобы огонь на пустых клетках не исчезал мгновенно!
         c.intensity = random.randint(45, 72)
         c.heat = 92.0
         c.state = "burning"
         c.moisture = 4.0
+
     elif tool == "concrete":
         c = grid[y][x]
         c.type = "concrete"
@@ -181,28 +181,27 @@ def place_stamp(x, y, tool):
 
     elif tool == "wood_floor":
         c = grid[y][x]
-        c.type = "floor"          # можно сделать отдельный тип, если хотите
+        c.type = "floor"
         c.fuel = random.randint(140, 190)
         c.moisture = 12
         c.state = "unburned"
+
     elif tool == "road_straight":
-        # Размер 64x64 = 4x4 клетки
         w, h = 4, 4
         if x + w <= COLS and y + h <= ROWS:
             for dy in range(h):
                 for dx in range(w):
                     c = grid[y + dy][x + dx]
                     if dx == 0 and dy == 0:
-                        c.type = "road_straight_root" # Тут будет рисоваться текстура
+                        c.type = "road_straight_root"
                     else:
-                        c.type = "road_straight_part" # Это просто физическое тело дороги
+                        c.type = "road_straight_part"
                     c.fuel = 0
                     c.moisture = 0
                     c.intensity = 0
                     c.state = "burned"
 
     elif tool == "road_turn":
-        # Размер 80x80 = 5x5 клеток
         w, h = 5, 5
         if x + w <= COLS and y + h <= ROWS:
             for dy in range(h):
@@ -216,31 +215,31 @@ def place_stamp(x, y, tool):
                     c.moisture = 0
                     c.intensity = 0
                     c.state = "burned"
+
     elif tool == "firecar":
-        # Машина 64x128 пикселей = 4x8 клеток
-        if x + 3 < COLS and y + 7 < ROWS: # Проверка, чтобы не выйти за края карты
+        if x + 3 < COLS and y + 7 < ROWS:
             for dy in range(8):
                 for dx in range(4):
                     c = grid[y + dy][x + dx]
                     if dx == 0 and dy == 0:
-                        c.type = "firecar_root" # Главная клетка, где будет текстура
+                        c.type = "firecar_root"
                     else:
-                        c.type = "firecar_part" # Остальной корпус (коллизия)
+                        c.type = "firecar_part"
                     c.fuel = 0
                     c.moisture = 0
                     c.intensity = 0
-                    c.state = "burned" # Не горит
+                    c.state = "burned"
 
 def update_fire():
     if not running_sim: return
 
     heat_map = [[0.0 for _ in range(COLS)] for _ in range(ROWS)]
 
-    # 1. Генерация тепла + ветер + вертикальный bias
+    # 1. Генерация тепла
     for y in range(ROWS):
         for x in range(COLS):
             c = grid[y][x]
-            heat_map[y][x] = c.heat * 0.67  # Затухание предыдущего тепла
+            heat_map[y][x] = c.heat * 0.67
 
             if c.intensity <= 8: continue
 
@@ -260,10 +259,11 @@ def update_fire():
 
                     heat_map[ny][nx] += heat + wind_bias * vertical_bias
 
-            c.fuel = max(0, c.fuel - props["burn_rate"] * (c.intensity / 42))
-            c.intensity = max(0, c.intensity - 1.45)
+            # Замедляем скорость выгорания, чтобы огонь не исчезал за 1 секунду
+            c.fuel = max(0, c.fuel - props["burn_rate"] * (c.intensity / 80.0))
+            c.intensity = max(0, c.intensity - 0.4)
 
-    # 2. Зажигание с 3D-правилом для кроны
+    # 2. Зажигание
     for y in range(ROWS):
         for x in range(COLS):
             c = grid[y][x]
@@ -306,17 +306,13 @@ def update_fire():
                 c.heat *= 0.52
 
 # ================= СЕТЬ =================
-clients = []                    # все активные соединения
-client_roles = {}               # conn → роль
+clients = []
+client_roles = {}
 grid_lock = threading.Lock()
 ALLOWED_ROLES = {"rtp", "nsh", "br", "dispatcher"}
 ROLE_LABELS = {
-    "rtp": "РТП",
-    "nsh": "НШ",
-    "br": "БР",
-    "dispatcher": "Диспетчер",
+    "rtp": "РТП", "nsh": "НШ", "br": "БР", "dispatcher": "Диспетчер",
 }
-
 
 def recv_exact(sock, size):
     data = b""
@@ -335,14 +331,12 @@ def send_msg(sock, data):
         pass
 
 def broadcast(data):
-    """Отправить сообщение ВСЕМ подключённым клиентам"""
     payload = json.dumps(data).encode('utf-8')
     packet = struct.pack('>I', len(payload)) + payload
     for c in clients[:]:
         try:
             c.sendall(packet)
         except Exception:
-            # если ошибка отправки — удаляем клиента
             if c in clients:
                 clients.remove(c)
             if c in client_roles:
@@ -350,19 +344,15 @@ def broadcast(data):
 
 def client_thread(conn, addr):
     global edit_mode, running_sim, grid
-
     print(f"[?] Попытка входа от: {addr}")
 
     try:
         conn.settimeout(10.0)
         raw_msglen = recv_exact(conn, 4)
-        if not raw_msglen:
-            print(f"[-] {addr} не прислал авторизацию")
-            return
+        if not raw_msglen: return
         msglen = struct.unpack('>I', raw_msglen)[0]
         data = recv_exact(conn, msglen)
-        if not data:
-            return
+        if not data: return
 
         auth = json.loads(data.decode('utf-8'))
         if auth.get('type') != 'AUTH' or auth.get('password') != SERVER_PASSWORD:
@@ -381,9 +371,8 @@ def client_thread(conn, addr):
             clients.append(conn)
             client_roles[conn] = role
 
-        print(f"[+] {addr} вошёл как {ROLE_LABELS.get(role, role)} | Игроков: {len(clients)}")
+        print(f"[+] {addr} вошёл | Игроков: {len(clients)}")
 
-        # Отправляем текущее состояние новому игроку
         with grid_lock:
             net_grid = [[[c.fuel, c.intensity, c.type] for c in row] for row in grid]
             send_msg(conn, {
@@ -395,12 +384,10 @@ def client_thread(conn, addr):
 
         while True:
             raw_msglen = recv_exact(conn, 4)
-            if not raw_msglen:
-                break
+            if not raw_msglen: break
             msglen = struct.unpack('>I', raw_msglen)[0]
             data = recv_exact(conn, msglen)
-            if not data:
-                break
+            if not data: break
 
             cmd = json.loads(data.decode('utf-8'))
             cmd_type = cmd.get('type')
@@ -459,15 +446,10 @@ def client_thread(conn, addr):
                                 c.state = "burning" if cell_data[1] > 0 else "unburned"
                         edit_mode = True
                         running_sim = False
-                        print(f"Карта загружена от клиента {addr}")
 
-                # Обработка HOST_READY
                 elif cmd_type == 'HOST_READY':
-                    print(f"[HOST_READY] Получена финальная карта от хоста {addr}")
                     final_grid = cmd.get('final_grid')
-
                     if final_grid and len(final_grid) == ROWS and all(len(row) == COLS for row in final_grid):
-                        # Фиксируем карту
                         for y in range(ROWS):
                             for x in range(COLS):
                                 fuel, intensity, ctype = final_grid[y][x]
@@ -480,33 +462,31 @@ def client_thread(conn, addr):
                                 c.state = "unburned" if intensity == 0 else "burning"
 
                         edit_mode = False
-                        running_sim = True
+                        # Важно: начинаем песочницу НА ПАУЗЕ, чтобы все игроки успели загрузиться!
+                        running_sim = False 
 
-                        # Рассылаем START_GAME всем
                         broadcast({
                             'type': 'START_GAME',
                             'grid': final_grid,
-                            'message': 'Игра началась! Карта зафиксирована хостом.'
+                            'message': 'Игра началась!'
                         })
-
-                        print("[SERVER] START_GAME разослан всем игрокам")
 
     except Exception as e:
         print(f"[!] Ошибка клиента {addr}: {e}")
     finally:
-        if conn in clients:
-            clients.remove(conn)
-        if conn in client_roles:
-            del client_roles[conn]
+        if conn in clients: clients.remove(conn)
+        if conn in client_roles: del client_roles[conn]
         conn.close()
-        print(f"[-] Игрок отключен: {addr}")
 
 def game_loop():
     global frame
     while True:
         with grid_lock:
             if running_sim and frame % UPDATE_EVERY == 0:
-                update_fire()
+                try:
+                    update_fire() # Обернули в try/except, чтобы ошибка никогда не убивала сервер
+                except Exception as e:
+                    print(f"Ошибка симуляции: {e}")
             frame += 1
 
             net_grid = [[[c.fuel, c.intensity, c.type] for c in row] for row in grid]
@@ -520,20 +500,18 @@ def game_loop():
         broadcast(state)
         time.sleep(1 / 33)
 
-# ================= ЗАПУСК =================
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind((HOST, PORT))
 server.listen(MAX_PLAYERS)
 
-print(f"Сервер запущен на {HOST}:{PORT} | Пароль: {SERVER_PASSWORD} | Макс. игроков: {MAX_PLAYERS}")
+print(f"Сервер запущен на {HOST}:{PORT}")
 
 threading.Thread(target=game_loop, daemon=True).start()
 
 while True:
     conn, addr = server.accept()
     if len(clients) >= MAX_PLAYERS:
-        print(f"[!] Отказ {addr} — сервер заполнен ({len(clients)}/{MAX_PLAYERS})")
         conn.close()
     else:
         threading.Thread(target=client_thread, args=(conn, addr), daemon=True).start()
