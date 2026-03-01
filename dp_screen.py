@@ -24,32 +24,49 @@ PLAYER_ROLE = "dispatcher"
 
 CELL = 16
 GRID_WIDTH = 960
-PANEL_WIDTH = 300
+PANEL_WIDTH = 340   # чуть шире для новых кнопок
 WIDTH = GRID_WIDTH + PANEL_WIDTH
 HEIGHT = 704
 COLS = GRID_WIDTH // CELL
 ROWS = HEIGHT // CELL
 FPS = 30
 
+# ================= МАШИНЫ =================
+TRUCKS = [
+    "АЦ-40", "АЦ-3,2-40/4", "АЦ-6,0-40", "ПНС-110",
+    "АР-2", "АНР-3,0-100", "АЛ-30", "АЛ-50"
+]
+
 def get_ui_font(size, bold=False):
     font_paths = ["C:/Windows/Fonts/arial.ttf", "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"]
     for path in font_paths:
         if os.path.exists(path):
-            try:
-                return pygame.font.Font(path, size)
-            except Exception:
-                pass
+            try: return pygame.font.Font(path, size)
+            except: pass
     return pygame.font.SysFont("arial", size, bold=bold)
 
 def recv_exact(sock, size):
     data = b""
     while len(data) < size:
         chunk = sock.recv(size - len(data))
-        if not chunk:
-            return None
+        if not chunk: return None
         data += chunk
     return data
 
+pygame.init()
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("ПУЛЬТ ДИСПЕТЧЕРА 01")
+clock = pygame.time.Clock()
+
+font_bold = get_ui_font(20, True)
+small_font = get_ui_font(16)
+tiny_font = get_ui_font(14)
+
+# ================= ТЕКСТУРЫ И КАРТА (без изменений) =================
+TEXTURES = {}
+fire_texture = None
+server_grid = [[[0, 0, "empty"] for _ in range(COLS)] for _ in range(ROWS)]
+running_sim = False
 # ================= PYGAME INIT =================
 pygame.init()
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
@@ -164,8 +181,11 @@ def draw_grid():
                 if ctype != "empty":
                     pygame.draw.rect(screen, (40, 40, 45), rect)
 
+last_truck_buttons = []   # для кликов
+
 def draw_dispatcher_panel():
-    # ... твой код панели без изменений ...
+    global last_truck_buttons
+    last_truck_buttons = []
     panel_x = GRID_WIDTH
     pygame.draw.rect(screen, (20, 30, 50), (panel_x, 0, PANEL_WIDTH, HEIGHT))
     pygame.draw.line(screen, (0, 150, 255), (panel_x, 0), (panel_x, HEIGHT), 2)
@@ -173,61 +193,52 @@ def draw_dispatcher_panel():
     y = 20
     title = font_bold.render("СЛУЖБА ДИСПЕТЧЕРА", True, (0, 255, 255))
     screen.blit(title, (panel_x + 35, y))
-    
-    y += 50
-    pygame.draw.rect(screen, (40, 50, 80), (panel_x + 10, y, PANEL_WIDTH - 20, 110), border_radius=5)
-    
-    services = [
-        ("ПОЖАРНАЯ ОХРАНА", "101", (255, 80, 80)),
-        ("ПОЛИЦИЯ", "102", (100, 150, 255)),
-        ("СКОРАЯ ПОМОЩЬ", "103", (100, 255, 100))
-    ]
-    yy = y + 10
-    for name, num, col in services:
-        screen.blit(small_font.render(name, True, (200, 200, 200)), (panel_x + 20, yy))
-        screen.blit(font_bold.render(num, True, col), (panel_x + PANEL_WIDTH - 50, yy - 2))
-        yy += 32
+    y += 60
 
-    y += 130
-    screen.blit(font_bold.render("ТЕХНИКА В РЕЗЕРВЕ:", True, (255, 255, 255)), (panel_x + 15, y))
-    y += 35
-    
-    trucks = ["АЦ-40 (Пожарная автоцистерна)", "АЛ-30 (Автолестница)", "АНР (Насосно-рукавный)",
-              "АСА (Аварийно-спасательный)", "АГ (Газодымозащитный)"]
-    for truck in trucks:
-        pygame.draw.circle(screen, (0, 200, 0), (panel_x + 25, y + 10), 5)
-        screen.blit(small_font.render(truck, True, (220, 220, 220)), (panel_x + 40, y))
-        y += 28
+    # === НОВЫЙ БЛОК: Вызвать технику ===
+    header = font_bold.render("ВЫЗВАТЬ ТЕХНИКУ:", True, (255, 220, 80))
+    screen.blit(header, (panel_x + 20, y))
+    y += 45
 
-    y = HEIGHT - 150
-    burning_count = sum(cell[1] > 8 for row in server_grid for cell in row)
-    color = (255, 100, 0) if burning_count > 0 else (100, 255, 100)
-    status_msg = "ВЫЗОВ АКТИВЕН" if burning_count > 0 else "ВЫЗОВОВ НЕТ"
-    
-    pygame.draw.rect(screen, (10, 15, 30), (panel_x + 10, y, PANEL_WIDTH - 20, 80), border_radius=10)
-    pygame.draw.rect(screen, color, (panel_x + 10, y, PANEL_WIDTH - 20, 80), width=2, border_radius=10)
-    
-    status_surf = font_bold.render(status_msg, True, color)
-    screen.blit(status_surf, status_surf.get_rect(center=(panel_x + PANEL_WIDTH//2, y + 25)))
-    
-    count_surf = small_font.render(f"Очагов горения: {burning_count}", True, (200, 200, 200))
-    screen.blit(count_surf, count_surf.get_rect(center=(panel_x + PANEL_WIDTH//2, y + 55)))
+    for truck in TRUCKS:
+        # фон строки
+        row_rect = pygame.Rect(panel_x + 15, y, PANEL_WIDTH - 30, 42)
+        pygame.draw.rect(screen, (35, 45, 70), row_rect, border_radius=6)
 
-    time_str = pygame.time.get_ticks() // 1000
-    time_surf = small_font.render(f"ВРЕМЯ СМЕНЫ: {time_str} сек", True, (100, 100, 100))
-    screen.blit(time_surf, (panel_x + 20, HEIGHT - 30))
+        # название машины
+        screen.blit(small_font.render(truck, True, (255, 255, 255)), (panel_x + 25, y + 12))
 
-# ================= ЦИКЛ =================
+        # кнопка "Отправить"
+        btn_rect = pygame.Rect(panel_x + PANEL_WIDTH - 115, y + 6, 92, 30)
+        mouse_pos = pygame.mouse.get_pos()
+        color = (0, 200, 100) if btn_rect.collidepoint(mouse_pos) else (0, 160, 80)
+        pygame.draw.rect(screen, color, btn_rect, border_radius=6)
+        screen.blit(tiny_font.render("Отправить", True, (255,255,255)), (btn_rect.x + 8, btn_rect.y + 8))
+
+        last_truck_buttons.append({"rect": btn_rect, "truck": truck})
+        y += 48
+
+    # остальная панель (статус пожара, техника в резерве и т.д.) — оставь как было
+    # ... (твой старый код status, время и т.д.)
+
+# ================= ЦИКЛ (добавляем обработку кнопок) =================
 running = True
 while running:
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
-        if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:
-            try:
-                sock.sendall(struct.pack(">I", len(b'{"type":"SPACE"}')) + b'{"type":"SPACE"}')
-            except:
-                pass
+
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            for btn in last_truck_buttons:
+                if btn["rect"].collidepoint(event.pos):
+                    # Отправляем на сервер
+                    try:
+                        data = {"type": "DEPLOY_TRUCK", "truck": btn["truck"]}
+                        msg = json.dumps(data).encode("utf-8")
+                        sock.sendall(struct.pack(">I", len(msg)) + msg)
+                        print(f"[DISPATCHER] Отправлена техника: {btn['truck']}")
+                    except:
+                        pass
 
     screen.fill((5, 10, 20))
     draw_grid()

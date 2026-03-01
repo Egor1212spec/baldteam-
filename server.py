@@ -11,7 +11,6 @@ try:
 except ImportError:
     load_dotenv = None
 
-# ================= НАСТРОЙКИ СЕРВЕРА =================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if load_dotenv is not None:
     load_dotenv(os.path.join(BASE_DIR, ".env"))
@@ -25,7 +24,11 @@ COLS = 60
 ROWS = 44
 UPDATE_EVERY = 6
 
-# ================= ЛОГИКА ИГРЫ =================
+TRUCKS = [
+    "АЦ-40", "АЦ-3,2-40/4", "АЦ-6,0-40", "ПНС-110",
+    "АР-2", "АНР-3,0-100", "АЛ-30", "АЛ-50"
+]
+
 class Cell:
     def __init__(self):
         self.fuel = 0
@@ -39,6 +42,7 @@ grid = [[Cell() for _ in range(COLS)] for _ in range(ROWS)]
 edit_mode = True
 running_sim = False
 frame = 0
+available_trucks = []
 
 WIND = (1, -3)
 WIND_STRENGTH = 2.15
@@ -159,7 +163,7 @@ def place_stamp(x, y, tool):
     elif tool == "ignite":
         c = grid[y][x]
         if c.fuel <= 10:
-            c.fuel = 60 # Искусственное топливо, чтобы огонь на пустых клетках не исчезал мгновенно!
+            c.fuel = 60
         c.intensity = random.randint(45, 72)
         c.heat = 92.0
         c.state = "burning"
@@ -216,10 +220,11 @@ def place_stamp(x, y, tool):
                     c.intensity = 0
                     c.state = "burned"
 
-    elif tool == "firecar":
-        if x + 3 < COLS and y + 7 < ROWS:
-            for dy in range(8):
-                for dx in range(4):
+    elif tool in TRUCKS or tool == "firecar":
+        w, h = 4, 8
+        if x + w <= COLS and y + h <= ROWS:
+            for dy in range(h):
+                for dx in range(w):
                     c = grid[y + dy][x + dx]
                     if dx == 0 and dy == 0:
                         c.type = "firecar_root"
@@ -229,13 +234,15 @@ def place_stamp(x, y, tool):
                     c.moisture = 0
                     c.intensity = 0
                     c.state = "burned"
+            if tool in available_trucks:
+                available_trucks.remove(tool)
+                broadcast({'type': 'TRUCK_AVAILABLE', 'available': available_trucks[:]})
 
 def update_fire():
     if not running_sim: return
 
     heat_map = [[0.0 for _ in range(COLS)] for _ in range(ROWS)]
 
-    # 1. Генерация тепла
     for y in range(ROWS):
         for x in range(COLS):
             c = grid[y][x]
@@ -259,11 +266,9 @@ def update_fire():
 
                     heat_map[ny][nx] += heat + wind_bias * vertical_bias
 
-            # Замедляем скорость выгорания, чтобы огонь не исчезал за 1 секунду
             c.fuel = max(0, c.fuel - props["burn_rate"] * (c.intensity / 80.0))
             c.intensity = max(0, c.intensity - 0.4)
 
-    # 2. Зажигание
     for y in range(ROWS):
         for x in range(COLS):
             c = grid[y][x]
@@ -295,7 +300,6 @@ def update_fire():
                     c.state = "burning"
                     c.moisture = max(0, c.moisture - 24)
 
-    # 3. Затухание
     for y in range(ROWS):
         for x in range(COLS):
             c = grid[y][x]
@@ -305,7 +309,6 @@ def update_fire():
                     c.state = "smoldering" if c.fuel > 3 else "burned"
                 c.heat *= 0.52
 
-# ================= СЕТЬ =================
 clients = []
 client_roles = {}
 grid_lock = threading.Lock()
@@ -462,7 +465,6 @@ def client_thread(conn, addr):
                                 c.state = "unburned" if intensity == 0 else "burning"
 
                         edit_mode = False
-                        # Важно: начинаем песочницу НА ПАУЗЕ, чтобы все игроки успели загрузиться!
                         running_sim = False 
 
                         broadcast({
@@ -470,6 +472,16 @@ def client_thread(conn, addr):
                             'grid': final_grid,
                             'message': 'Игра началась!'
                         })
+
+                elif cmd_type == 'DEPLOY_TRUCK':
+                    truck = cmd.get('truck')
+                    if truck and truck in TRUCKS:
+                        available_trucks.append(truck)
+                        broadcast({'type': 'TRUCK_AVAILABLE', 'truck': truck, 'available': available_trucks[:]})
+                        print(f"[SERVER] Диспетчер отправил {truck}")
+
+                elif cmd_type == 'PLACE_TRUCK':
+                    place_stamp(cmd['x'], cmd['y'], cmd['truck'])
 
     except Exception as e:
         print(f"[!] Ошибка клиента {addr}: {e}")
@@ -484,7 +496,7 @@ def game_loop():
         with grid_lock:
             if running_sim and frame % UPDATE_EVERY == 0:
                 try:
-                    update_fire() # Обернули в try/except, чтобы ошибка никогда не убивала сервер
+                    update_fire()
                 except Exception as e:
                     print(f"Ошибка симуляции: {e}")
             frame += 1
@@ -494,7 +506,8 @@ def game_loop():
                 'type': 'STATE_UPDATE',
                 'grid': net_grid,
                 'edit_mode': edit_mode,
-                'running_sim': running_sim
+                'running_sim': running_sim,
+                'available_trucks': available_trucks[:]
             }
 
         broadcast(state)
