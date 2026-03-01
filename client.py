@@ -378,15 +378,44 @@ while running:
 
 # === [ИЗМЕНЕНИЕ 4] Вся логика переключения теперь здесь, ПОСЛЕ выхода из главного цикла ===
 if should_switch:
-    print("Корректно вышли из цикла, запускаем game_sandbox.py...")
-    pygame.quit() # Теперь безопасно закрывать Pygame
+    print(f"\n{'='*70}")
+    print(f"[SWITCH] Получена команда START_GAME!")
+    print(f"[SWITCH] Текущая роль: {PLAYER_ROLE.upper()}")
+    print(f"[SWITCH] BASE_DIR: {BASE_DIR}")
+    print(f"{'='*70}\n")
+
+    pygame.quit()
+    import time
+    time.sleep(0.5)                     # ← КРИТИЧНО! Даём SDL очиститься
+
+    script_name = "dp_screen.py" if PLAYER_ROLE == "dispatcher" else "game_sandbox.py"
+    script_path = os.path.join(BASE_DIR, script_name)
+
+    print(f"[LAUNCH] Запускаем: {script_name}")
+    print(f"[LAUNCH] Полный путь: {script_path}")
+    print(f"[LAUNCH] Файл существует: {os.path.exists(script_path)}")
+
+    if not os.path.exists(script_path):
+        print(f"[ERROR] Файл {script_path} НЕ НАЙДЕН!")
+        input("Нажми Enter для выхода...")
+        sys.exit(1)
+
     env = os.environ.copy()
     env["SERVER_IP"] = SERVER_IP
     env["SERVER_PORT"] = str(SERVER_PORT)
     env["SERVER_PASSWORD"] = SERVER_PASSWORD
     env["PLAYER_ROLE"] = PLAYER_ROLE
-    subprocess.Popen([sys.executable, os.path.join(BASE_DIR, "game_sandbox.py")], env=env)
-    sys.exit(0) # Используем sys.exit для более чистого выхода
+
+    try:
+        p = subprocess.Popen([sys.executable, script_path], env=env)
+        print(f"[LAUNCH] subprocess запущен (PID={p.pid})")
+    except Exception as e:
+        print(f"[ERROR] Не удалось запустить {script_name}: {e}")
+        import traceback
+        traceback.print_exc()
+        input("Нажми Enter...")
+
+    sys.exit(0)
 else:
     client.close()
     pygame.quit()
